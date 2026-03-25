@@ -1,0 +1,110 @@
+# ==========================================
+# Python
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ==========================================
+# Virtual Environments
+# ==========================================
+venv/
+ENV/
+env/
+.venv
+
+# ==========================================
+# IDE
+# ==========================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+
+# ==========================================
+# Database & Logs
+# ==========================================
+*.db
+*.sqlite
+*.sqlite3
+logs/
+*.log
+
+# ==========================================
+# Assets & Models (Large files)
+# ==========================================
+assets/models/*.pt
+assets/models/*.pth
+assets/models/*.onnx
+assets/models/*.weights
+assets/audio/
+assets/output/
+assets/temp_frames/
+
+# ==========================================
+# Temporary Files
+# ==========================================
+*.tmp
+*.temp
+*.bak
+*.backup
+.tmp/
+
+# ==========================================
+# OS-specific
+# ==========================================
+.DS_Store
+Thumbs.db
+.env
+.env.local
+.env.*.local
+
+# ==========================================
+# Project Specific (bag files, video cache, etc)
+# ==========================================
+*.bag
+*.bagidx
+inference/
+predictions/
+*_cache/
+.cache/
+
+# ==========================================
+# Jupyter Notebooks
+# ==========================================
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ==========================================
+# Generated/Build Output
+# ==========================================
+*.pyc
+.pytest_cache/
+htmlcov/
+.coverage

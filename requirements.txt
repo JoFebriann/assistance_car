@@ -1,0 +1,15 @@
+fastapi==0.109.2
+uvicorn==0.27.0
+torch==2.3.0
+torchvision==0.18.0
+pyrealsense2==2.55.1.5158
+opencv-python==4.8.1.78
+opencv-contrib-python==4.8.1.78
+numpy==1.24.3
+scipy==1.11.4
+matplotlib==3.8.2
+pydantic==2.5.3
+python-multipart==0.0.6
+Pillow==10.1.0
+scipy==1.11.4
+scikit-image==0.22.0
