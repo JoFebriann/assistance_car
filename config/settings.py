@@ -8,7 +8,7 @@ TEMP_FRAMES_DIR = ASSETS_DIR / "temp_frames"
 LOG_DIR = BASE_DIR / "logs"
 
 MODEL_PATH = BASE_DIR / "assets" / "models" / "yolo.pt"
-LANE_MODEL_PATH = BASE_DIR / "assets" / "models" / "lane_twinlitenet.pth"
+LANE_MODEL_PATH = BASE_DIR / "assets" / "models" / "lane_twinlitenet_best.pth"
 
 DB_PATH = BASE_DIR / "perception.db"
 SCHEMA_PATH = BASE_DIR / "database" / "schema.sql"
