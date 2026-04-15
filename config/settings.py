@@ -39,6 +39,11 @@ FLOW_CONFIG = {
 	"flags": 0,
 }
 
+OBJECT_FLOW_CONFIG = {
+	# Object is considered "moving" if its bbox mean flow magnitude exceeds this (px/frame)
+	"moving_threshold": 1.5,
+}
+
 VIDEO_CONFIG = {
 	"default_fps": 20.0,
 	"codec": "mp4v",

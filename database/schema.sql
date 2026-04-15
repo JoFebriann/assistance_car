@@ -26,6 +26,11 @@ CREATE TABLE IF NOT EXISTS detections (
     bbox_y2 REAL,
     distance_m REAL,
     risk_level TEXT,
+    -- Per-object optical flow (NULL when flow unavailable, e.g. first frame)
+    object_flow_magnitude REAL,
+    object_flow_dx        REAL,
+    object_flow_dy        REAL,
+    is_moving             INTEGER,  -- 1 = moving, 0 = stationary, NULL = unknown
     FOREIGN KEY(frame_id) REFERENCES frames(frame_id)
 );
 
