@@ -3,7 +3,7 @@ from pathlib import Path
 
 from services.video_service import VideoService
 from database.db import init_database
-from config.settings import MODEL_PATH
+from config.settings import YOLO_MODEL_PATH
 
 
 def main():
@@ -33,7 +33,7 @@ def main():
     init_database()
 
     print(f"Processing file: {args.source}")
-    service = VideoService(MODEL_PATH)
+    service = VideoService(YOLO_MODEL_PATH)
     service.process(args.source, args.type)
 
 

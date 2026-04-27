@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS detections (
     bbox_y2 REAL,
     distance_m REAL,
     risk_level TEXT,
+    risk_score REAL,
+    lane_overlap_ratio REAL,
     -- Per-object optical flow (NULL when flow unavailable, e.g. first frame)
     object_flow_magnitude REAL,
     object_flow_dx        REAL,
@@ -53,6 +55,10 @@ CREATE TABLE IF NOT EXISTS optical_flow (
 CREATE TABLE IF NOT EXISTS scene_metrics (
     frame_id INTEGER PRIMARY KEY,
     scene_risk_score REAL,
+    path_occupancy_risk REAL,
+    dynamic_hazard_index REAL,
+    drivable_capacity_score REAL,
+    trip_safety_score REAL,
     alert_flag INTEGER,
     FOREIGN KEY(frame_id) REFERENCES frames(frame_id)
 );
@@ -64,5 +70,23 @@ CREATE TABLE IF NOT EXISTS lane_metrics (
     frame_id INTEGER PRIMARY KEY,
     lane_pixel_ratio REAL,
     drivable_pixel_ratio REAL,
+    FOREIGN KEY(frame_id) REFERENCES frames(frame_id)
+);
+
+-- ===============================
+-- PERFORMANCE METRICS
+-- ===============================
+CREATE TABLE IF NOT EXISTS performance_metrics (
+    frame_id INTEGER PRIMARY KEY,
+    yolo_ms REAL,
+    global_flow_ms REAL,
+    object_flow_ms REAL,
+    lane_ms REAL,
+    risk_ms REAL,
+    scene_ms REAL,
+    annotation_ms REAL,
+    pipeline_total_ms REAL,
+    pipeline_fps REAL,
+    detection_count INTEGER,
     FOREIGN KEY(frame_id) REFERENCES frames(frame_id)
 );

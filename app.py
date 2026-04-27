@@ -10,16 +10,18 @@ from fastapi import FastAPI, File, Form, UploadFile, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from config.settings import MODEL_PATH, OUTPUT_DIR, UI_CONFIG
+from config.settings import YOLO_MODEL_PATH, OUTPUT_DIR, UI_CONFIG
 from database.db import init_database
 from database.repository import AnalyticsRepository
 from services.realtime_stream_service import RealSenseRealtimeService
 from services.video_service import VideoService
+from utils.logger import get_logger
 
 
 app = FastAPI(title=UI_CONFIG["title"])
 app.mount("/media/output", StaticFiles(directory=str(OUTPUT_DIR)), name="media-output")
-realtime_service = RealSenseRealtimeService(str(MODEL_PATH))
+realtime_service = RealSenseRealtimeService(str(YOLO_MODEL_PATH))
+app_logger = get_logger("WebApp")
 
 
 # ── Live camera stream (MJPEG) ──────────────────────────────────────────────
@@ -136,9 +138,30 @@ def _render_page(
     total_frames = summary.get("total_frames", 0)
     total_detections = summary.get("total_detections", 0)
     high_risk_objects = summary.get("high_risk_objects", 0)
+    avg_object_risk_score = summary.get("avg_object_risk_score", 0) or 0
+    avg_lane_overlap_ratio = summary.get("avg_lane_overlap_ratio", 0) or 0
     avg_flow = summary.get("avg_flow", 0) or 0
+    avg_scene_risk_score = summary.get("avg_scene_risk_score", 0) or 0
+    avg_path_occupancy_risk = summary.get("avg_path_occupancy_risk", 0) or 0
+    avg_dynamic_hazard_index = summary.get("avg_dynamic_hazard_index", 0) or 0
+    avg_drivable_capacity_score = summary.get("avg_drivable_capacity_score", 0) or 0
+    avg_trip_safety_score = summary.get("avg_trip_safety_score", 0) or 0
     avg_lane_ratio = summary.get("avg_lane_ratio", 0) or 0
     avg_drivable_ratio = summary.get("avg_drivable_ratio", 0) or 0
+    avg_yolo_ms = summary.get("avg_yolo_ms", 0) or 0
+    avg_global_flow_ms = summary.get("avg_global_flow_ms", 0) or 0
+    avg_object_flow_ms = summary.get("avg_object_flow_ms", 0) or 0
+    avg_lane_ms = summary.get("avg_lane_ms", 0) or 0
+    avg_risk_ms = summary.get("avg_risk_ms", 0) or 0
+    avg_scene_ms = summary.get("avg_scene_ms", 0) or 0
+    avg_annotation_ms = summary.get("avg_annotation_ms", 0) or 0
+    avg_pipeline_total_ms = summary.get("avg_pipeline_total_ms", 0) or 0
+    p50_pipeline_total_ms = summary.get("p50_pipeline_total_ms", 0) or 0
+    p95_pipeline_total_ms = summary.get("p95_pipeline_total_ms", 0) or 0
+    min_pipeline_total_ms = summary.get("min_pipeline_total_ms", 0) or 0
+    max_pipeline_total_ms = summary.get("max_pipeline_total_ms", 0) or 0
+    avg_pipeline_fps = summary.get("avg_pipeline_fps", 0) or 0
+    avg_detection_per_frame = summary.get("avg_detection_per_frame", 0) or 0
 
     escaped_message = escape(message)
 
@@ -332,12 +355,17 @@ def _render_page(
       <form id='process-form' method='post' action='/process' enctype='multipart/form-data'>
         <label for='source_type'>Source Type</label>
         <select id='source_type' name='source_type'>
-          <option value='mp4'>mp4</option>
+          <!-- <option value='mp4'>mp4</option> -->
           <option value='bag'>bag</option>
         </select>
 
+        <label for='bag_file'>Upload BAG File (opsional, untuk bag source)</label>
+        <input id='bag_file' name='bag_file' type='file' accept='.bag'>
+
+        <!--
         <label for='file'>Upload MP4 File (for mp4 source)</label>
         <input id='file' name='file' type='file' accept='.mp4'>
+        -->
 
         <label for='bag_path'>Local BAG Path (for bag source)</label>
         <input id='bag_path' name='bag_path' type='text' placeholder='C:/path/to/file.bag'>
@@ -356,9 +384,35 @@ def _render_page(
         <div class='metric'><strong>Total Frames</strong><br>{total_frames}</div>
         <div class='metric'><strong>Total Detections</strong><br>{total_detections}</div>
         <div class='metric'><strong>High Risk Objects</strong><br>{high_risk_objects}</div>
+        <div class='metric'><strong>Avg Object Risk</strong><br>{avg_object_risk_score:.2f}</div>
+        <div class='metric'><strong>Avg Lane Overlap</strong><br>{avg_lane_overlap_ratio * 100:.2f}%</div>
         <div class='metric'><strong>Average Flow</strong><br>{avg_flow:.2f}</div>
+        <div class='metric'><strong>Avg Scene Risk</strong><br>{avg_scene_risk_score:.2f}</div>
+        <div class='metric'><strong>Path Occupancy Risk</strong><br>{avg_path_occupancy_risk:.2f}</div>
+        <div class='metric'><strong>Dynamic Hazard Index</strong><br>{avg_dynamic_hazard_index:.2f}</div>
+        <div class='metric'><strong>Drivable Capacity</strong><br>{avg_drivable_capacity_score:.2f}</div>
+        <div class='metric'><strong>Trip Safety Score</strong><br>{avg_trip_safety_score:.2f}</div>
         <div class='metric'><strong>Avg Lane Pixels</strong><br>{avg_lane_ratio * 100:.2f}%</div>
         <div class='metric'><strong>Avg Drivable Area</strong><br>{avg_drivable_ratio * 100:.2f}%</div>
+      </div>
+    </div>
+
+    <div class='card'>
+      <h2>Performance Evaluation</h2>
+      <div class='row'>
+        <div class='metric'><strong>Avg Total Inference</strong><br>{avg_pipeline_total_ms:.2f} ms</div>
+        <div class='metric'><strong>Avg FPS</strong><br>{avg_pipeline_fps:.2f}</div>
+        <div class='metric'><strong>P50 Total Latency</strong><br>{p50_pipeline_total_ms:.2f} ms</div>
+        <div class='metric'><strong>P95 Total Latency</strong><br>{p95_pipeline_total_ms:.2f} ms</div>
+        <div class='metric'><strong>Min/Max Total Latency</strong><br>{min_pipeline_total_ms:.2f} / {max_pipeline_total_ms:.2f} ms</div>
+        <div class='metric'><strong>Avg Detection/Frame</strong><br>{avg_detection_per_frame:.2f}</div>
+        <div class='metric'><strong>YOLO Inference</strong><br>{avg_yolo_ms:.2f} ms</div>
+        <div class='metric'><strong>Global Flow</strong><br>{avg_global_flow_ms:.2f} ms</div>
+        <div class='metric'><strong>Object Flow</strong><br>{avg_object_flow_ms:.2f} ms</div>
+        <div class='metric'><strong>Lane Segmentation</strong><br>{avg_lane_ms:.2f} ms</div>
+        <div class='metric'><strong>Risk Fusion</strong><br>{avg_risk_ms:.2f} ms</div>
+        <div class='metric'><strong>Scene Metrics</strong><br>{avg_scene_ms:.2f} ms</div>
+        <div class='metric'><strong>Annotation Render</strong><br>{avg_annotation_ms:.2f} ms</div>
       </div>
     </div>
 
@@ -545,31 +599,61 @@ def index():
 async def process(
     source_type: str = Form(...),
     bag_path: str = Form(default=""),
+    bag_file: UploadFile | None = File(default=None),
     file: UploadFile | None = File(default=None),
 ):
     source_type = (source_type or "").strip().lower()
-    service = VideoService(MODEL_PATH)
 
     temp_upload_path: Path | None = None
+    source_path: Path | None = None
 
     try:
-        if source_type not in {"bag", "mp4"}:
-            return _render_page(message="Source type harus bag atau mp4.")
+        app_logger.info(
+            "POST /process received | source_type=%s | bag_file=%s | file=%s | bag_path=%s",
+            source_type,
+            bool(bag_file and bag_file.filename),
+            bool(file and file.filename),
+            bag_path,
+        )
 
-        if source_type == "bag":
-            source_path = Path(bag_path.strip())
-            if not source_path.exists() or source_path.suffix.lower() != ".bag":
-                return _render_page(message="Path BAG tidak valid.")
-        else:
-            if file is None or not file.filename:
-                return _render_page(message="Silakan upload file MP4.")
-            if not file.filename.lower().endswith(".mp4"):
-                return _render_page(message="File harus berekstensi .mp4.")
+        if source_type not in {"bag"}:
+            return _render_page(message="Source type sementara hanya bag (opsi mp4 dinonaktifkan).")
 
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
+        # Prefer uploaded BAG when provided, otherwise fall back to local path.
+        if bag_file is not None and bag_file.filename:
+            if not bag_file.filename.lower().endswith(".bag"):
+                return _render_page(message="File BAG harus berekstensi .bag.")
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".bag") as temp_file:
+                shutil.copyfileobj(bag_file.file, temp_file)
+                temp_upload_path = Path(temp_file.name)
+            source_path = temp_upload_path
+        elif file is not None and file.filename and file.filename.lower().endswith(".bag"):
+            # Compatibility fallback for older cached UI that may still post to `file`.
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".bag") as temp_file:
                 shutil.copyfileobj(file.file, temp_file)
                 temp_upload_path = Path(temp_file.name)
             source_path = temp_upload_path
+        else:
+            source_path = Path(bag_path.strip())
+            if not source_path.exists() or source_path.suffix.lower() != ".bag":
+                return _render_page(message="Path BAG tidak valid atau upload file BAG terlebih dahulu.")
+        # else:
+        #     if file is None or not file.filename:
+        #         return _render_page(message="Silakan upload file MP4.")
+        #     if not file.filename.lower().endswith(".mp4"):
+        #         return _render_page(message="File harus berekstensi .mp4.")
+        #
+        #     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
+        #         shutil.copyfileobj(file.file, temp_file)
+        #         temp_upload_path = Path(temp_file.name)
+        #     source_path = temp_upload_path
+
+        if source_path is None:
+            return _render_page(message="Sumber BAG belum ditentukan.")
+
+        app_logger.info("Starting pipeline for BAG source: %s", source_path)
+        service = VideoService(YOLO_MODEL_PATH)
 
         start = time.time()
         output_video_path = service.process(str(source_path), source_type)
@@ -584,6 +668,7 @@ async def process(
         )
 
     except Exception as exc:
+        app_logger.error("Processing failed: %s", exc, exc_info=True)
         return _render_page(message=f"Processing gagal: {escape(str(exc))}")
     finally:
         if temp_upload_path and temp_upload_path.exists():

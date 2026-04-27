@@ -100,6 +100,7 @@ class RealSenseRealtimeService:
                     flow_stats=result["flow"],
                     scene_risk=result["scene_risk"],
                     lane_result=result.get("lane"),
+                    perf_stats=result.get("performance"),
                 )
 
                 ok, encoded = cv2.imencode(

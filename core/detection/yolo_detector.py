@@ -7,6 +7,7 @@ class YOLODetector(BaseDetector):
     def __init__(self, model_path: str, conf: float | None = None):
         self.model = YOLO(model_path)
         self.conf = conf if conf is not None else YOLO_CONFIG["confidence_threshold"]
+        self.class_names = getattr(self.model, "names", {})
 
     def detect(self, image):
         results = self.model(image, conf=self.conf)
@@ -18,10 +19,13 @@ class YOLODetector(BaseDetector):
             classes = r.boxes.cls.cpu().numpy()
 
             for box, score, cls in zip(boxes, scores, classes):
+                class_id = int(cls)
+                class_name = self.class_names.get(class_id, str(class_id))
                 detections.append({
                     "bbox": box.tolist(),
                     "confidence": float(score),
-                    "class_id": int(cls),
+                    "class_id": class_id,
+                    "class_name": str(class_name),
                 })
 
         return detections

@@ -9,6 +9,7 @@ from utils.logger import get_logger
 from config.settings import OUTPUT_DIR, PROCESSING_CONFIG, VIDEO_CONFIG
 
 from pathlib import Path
+import time
 
 
 class VideoService:
@@ -28,6 +29,7 @@ class VideoService:
 
         reset_database()
         self.pipeline.reset()
+        run_started = time.perf_counter()
 
         run_id = Path(source_path).stem
         self.logger.info(f"Run ID: {run_id}")
@@ -68,6 +70,14 @@ class VideoService:
                 )
 
         self.logger.info(f"Finished frame processing: {frame_count} frames")
+
+        total_elapsed_s = time.perf_counter() - run_started
+        throughput_fps = (frame_count / total_elapsed_s) if total_elapsed_s > 0 else 0.0
+        self.logger.info(
+            "Processing throughput: %.2f FPS over %.2fs",
+            throughput_fps,
+            total_elapsed_s,
+        )
 
         # Read the actual FPS that was detected inside generate() during iteration
         fps = getattr(frame_gen, 'fps', PROCESSING_CONFIG["default_fps"])

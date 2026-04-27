@@ -1,6 +1,6 @@
 # 🚗 Assistance Car Perception System
 
-Sistem persepsi kendaraan berbasis computer vision yang memproses video dari kamera stereo (Intel RealSense `.bag`) atau file video biasa (`.mp4`) untuk melakukan **object detection**, **depth estimation**, **optical flow**, dan **risk assessment** secara real-time per frame. Hasil analisis disimpan ke database SQLite dan ditampilkan melalui antarmuka FastAPI Web UI sederhana (HTML).
+Sistem persepsi kendaraan berbasis computer vision yang memproses video dari kamera stereo (Intel RealSense `.bag`) atau file video biasa (`.mp4`) untuk melakukan **object detection**, **depth estimation**, **global + object optical flow**, dan **risk assessment** secara real-time per frame. Hasil analisis disimpan ke database SQLite dan ditampilkan melalui antarmuka FastAPI Web UI sederhana (HTML).
 
 ---
 
@@ -38,13 +38,14 @@ Sistem ini dirancang untuk membantu pengemudi kendaraan dengan menganalisis kond
 |---|---|
 | **Object Detection** | Mendeteksi objek di jalan (kendaraan, pejalan kaki, dll.) menggunakan YOLO |
 | **Depth Estimation** | Mengukur jarak objek ke kamera dari data depth stereo (dalam meter) |
-| **Optical Flow** | Menganalisis pergerakan global seluruh scene per frame (metode Farnebäck) |
+| **Optical Flow** | Menganalisis pergerakan global scene dan pergerakan tiap objek (ROI per-bounding-box) dari dense flow Farnebäck |
 | **Lane + Drivable Segmentation** | Segmentasi lajur dan area drivable menggunakan TwinLiteNetPlus |
-| **Risk Assessment** | Menilai level risiko setiap objek (HIGH / MEDIUM / LOW) dan risiko keseluruhan scene |
+| **Risk Assessment** | Menilai level risiko setiap objek (HIGH / MEDIUM / LOW / UNKNOWN) dan risiko keseluruhan scene dengan mempertimbangkan status gerak objek |
 | **Persistensi Data** | Menyimpan semua hasil analisis ke database SQLite (`perception.db`) |
-| **Output Video** | Menghasilkan video anotasi dengan bounding box, jarak, level risiko, dan info optical flow |
+| **Output Video** | Menghasilkan video anotasi dengan bounding box, jarak, level risiko, status gerak objek (MOV/STA), panah gerak, info scene flow, serta overlay inference time + FPS |
 | **Audio Alert** | Menghasilkan file WAV dengan bunyi beep saat terdeteksi objek berisiko tinggi |
-| **Dashboard** | Menampilkan ringkasan analitik melalui antarmuka FastAPI Web UI |
+| **Performance Evaluation** | Mengukur inference time per fitur, total pipeline latency, FPS, latency percentile (P50/P95), dan rata-rata deteksi per frame |
+| **Dashboard** | Menampilkan ringkasan analitik (risk + performance) melalui antarmuka FastAPI Web UI |
 
 ---
 
@@ -81,7 +82,12 @@ Sistem ini dirancang untuk membantu pengemudi kendaraan dengan menganalisis kond
 │  │   YOLO v11)  │  │   depth ROI)│  │   dense flow)     │  │
 │  └──────┬───────┘  └──────┬──────┘  └────────┬──────────┘  │
 │         │                 │                   │             │
-│         └─────────────────▼───────────────────┘            │
+│         │                 │          ┌────────▼──────────┐  │
+│         │                 │          │ ObjectOpticalFlow │  │
+│         │                 │          │ (per-bbox ROI     │  │
+│         │                 │          │  motion stats)    │  │
+│         │                 │          └────────┬──────────┘  │
+│         └─────────────────▼───────────────────▼────────────┐│
 │                        RiskEngine                           │
 │             (per-object + scene-level risk)                 │
 │                                                             │
@@ -96,7 +102,7 @@ Sistem ini dirancang untuk membantu pengemudi kendaraan dengan menganalisis kond
 │                                                             │
 │              SQLite — perception.db                         │
 │                                                             │
-│   frames | detections | optical_flow | scene_metrics        │
+│   frames | detections | optical_flow | scene_metrics | lane_metrics | performance_metrics │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -124,10 +130,13 @@ assistance_car/
 │   ├── depth/
 │   │   └── stereo_depth.py         # StereoDepth: median distance dari depth map
 │   │
-│   ├── optical_flow/
-│   │   └── global_flow.py          # GlobalOpticalFlow: Farnebäck dense flow
-│   │
 │   ├── lane/                       # Lane segmentation (TwinLiteNetPlus)
+│   │   ├── lane_detector.py        # Wrapper inferensi lane/drivable
+│   │   └── twinlitenet_model.py    # Arsitektur model TwinLiteNetPlus
+│   │
+│   ├── optical_flow/
+│   │   ├── global_flow.py          # Dense flow global (scene level)
+│   │   └── object_flow.py          # Statistik flow per objek (ROI bbox)
 │   │
 │   ├── calculation/
 │   │   └── risk_engine.py          # RiskEngine: per-object & scene risk
@@ -139,8 +148,8 @@ assistance_car/
 │
 ├── database/
 │   ├── db.py                       # Koneksi SQLite, init & reset database
-│   ├── schema.sql                  # DDL: 4 tabel utama
-│   └── repository.py               # Repository pattern: 5 kelas repository
+│   ├── schema.sql                  # DDL: tabel analytics + performance
+│   └── repository.py               # Repository pattern: 6 kelas repository
 │
 ├── services/
 │   ├── video_service.py            # VideoService: orkestrasi level run
@@ -208,44 +217,52 @@ Berikut adalah alur data lengkap dari input hingga output:
 │    → YOLODetector.detect(rgb_image)         │
 │      Output: [{bbox, confidence, class_id}] │
 │                                             │
-│    Untuk tiap deteksi:                      │
-│    → StereoDepth.compute_distance(          │
-│        depth_map, bbox)                     │
-│      Output: distance_m (meter)             │
-│      Metode: median pixel dalam ROI bbox    │
-│                                             │
-│    → RiskEngine.estimate_risk(distance_m)   │
-│      < 5m  → HIGH                          │
-│      < 10m → MEDIUM                        │
-│      ≥ 10m → LOW                           │
-│      None  → UNKNOWN                       │
-│                                             │
-│    → DetectionRepository.insert()          │
-│      → INSERT INTO detections              │
-│                                             │
 │  Langkah 3: Optical Flow                    │
 │    → GlobalOpticalFlow.compute(rgb_image)   │
 │      Metode: Farnebäck dense flow          │
-│      Output: {mean_magnitude,               │
-│               median_magnitude,             │
-│               std_magnitude,                │
-│               mean_dx, mean_dy}             │
+│      Output: (flow_stats, flow_field)       │
 │    → OpticalFlowRepository.insert()        │
 │      → INSERT INTO optical_flow            │
 │                                             │
-│  Langkah 4: Scene Risk                      │
-│    → RiskEngine.compute_scene_risk()        │
-│      = jumlah objek HIGH risk di frame ini  │
-│    → SceneRepository.insert()              │
-│      → INSERT INTO scene_metrics           │
+│  Langkah 4: Object Optical Flow             │
+│    → ObjectOpticalFlow.compute_object_flows(│
+│        flow_field, detections)              │
+│      Output per objek:                      │
+│      {object_magnitude, object_dx,          │
+│       object_dy, is_moving}                 │
 │                                             │
-│  Langkah 5: Simpan Frame Anotasi            │
+│  Langkah 5: Depth + Risk per Object         │
+│    → StereoDepth.compute_distance(...)       │
+│    → RiskEngine.assess_object_risk(          │
+│        distance_m, object_flow, lane_result, │
+│        bbox, class_id)                      │
+│      Output: risk + risk_score +             │
+│      lane_overlap + occupancy contribution   │
+│    → DetectionRepository.insert()           │
+│      → INSERT INTO detections               │
+│        (+ risk_score, lane_overlap, object_flow) │
+│                                             │
+│  Langkah 6: Scene Fusion Metrics            │
+│    → RiskEngine.compute_scene_metrics()     │
+│      Output: scene_risk_score,              │
+│      path_occupancy_risk, dynamic_hazard,   │
+│      drivable_capacity, trip_safety, alert  │
+│    → SceneRepository.insert(frame_id, metrics) │
+│      → INSERT INTO scene_metrics            │
+│                                             │
+│  Langkah 7: Simpan Frame Anotasi            │
 │    → _draw_annotations() → BGR image        │
 │      Anotasi: bounding box berwarna,        │
 │               label class + jarak + risk,   │
-│               info flow, info scene risk    │
+│               MOV/STA + panah gerak objek,  │
+│               info scene flow + scene risk, │
+│               inference ms + FPS            │
 │    → FrameSaver.save() → PNG               │
 │      Path: assets/temp_frames/{run_id}/     │
+│                                             │
+│  Langkah 8: Simpan Performance Metrics       │
+│    → INSERT INTO performance_metrics         │
+│      (per-model ms, total ms, fps, p95-ready)|
 └──────────┬──────────────────────────────────┘
            │ (setelah semua frame selesai)
            ▼
@@ -284,13 +301,13 @@ Antarmuka utama berbasis web yang dijalankan dengan `uvicorn app:app --reload`.
 Halaman web sederhana menyediakan:
 1. Form input source (`bag` atau `mp4`)
 2. Trigger proses pipeline end-to-end
-3. Ringkasan metrik (Total Frames, Total Detections, High Risk Objects, Average Flow)
+3. Ringkasan metrik operasional + insight (`Path Occupancy Risk`, `Dynamic Hazard Index`, `Drivable Capacity Score`, `Trip Safety Score`)
 4. Preview video output dan audio alert
 
 Alur di `app.py`:
 1. `init_database()` dipanggil saat startup FastAPI
 2. Saat endpoint `/process` dipanggil → file MP4 disimpan sementara (temporary file) atau path BAG langsung digunakan
-3. `VideoService(MODEL_PATH).process(source_path, source_type)` dijalankan
+3. `VideoService(YOLO_MODEL_PATH).process(source_path, source_type)` dijalankan
 4. Setelah selesai → `AnalyticsRepository().summary()` dipanggil untuk menampilkan ringkasan
 
 #### `run_backend.py` — CLI
@@ -310,10 +327,14 @@ python run_backend.py --source path/to/file.mp4 --type mp4
 
 ```python
 BASE_DIR = Path(__file__).resolve().parent.parent  # → assistance_car/
-MODEL_PATH = BASE_DIR / "assets" / "models" / "yolo.pt"
+YOLO_MODEL_PATH = BASE_DIR / "assets" / "models" / "yolo.pt"
 ```
 
-Satu-satunya konfigurasi global saat ini adalah path ke model YOLO. Semua path lainnya diderivasi dari `BASE_DIR`.
+Konfigurasi penting sekarang mencakup:
+- `YOLO_MODEL_PATH` dan `LANE_MODEL_PATH`
+- `RISK_CONFIG` untuk threshold jarak
+- `RISK_FUSION_CONFIG` untuk bobot fusion object/scene insights
+- `FLOW_CONFIG` dan `OBJECT_FLOW_CONFIG` untuk optical flow global + object-level
 
 ---
 
@@ -324,7 +345,7 @@ Satu-satunya konfigurasi global saat ini adalah path ke model YOLO. Semua path l
 Orkestrator level "per run" — satu call ke `process()` menangani satu file input secara penuh.
 
 Langkah-langkah `process()`:
-1. `reset_database()` — Hapus data lama dari 4 tabel
+1. `reset_database()` — Hapus data lama dari 5 tabel
 2. `pipeline.reset()` — Reset state optical flow (prev_gray = None)
 3. Tentukan `run_id` dari stem nama file input
 4. Buat `FrameSaver(run_id)` — siapkan direktori temp frame
@@ -345,7 +366,7 @@ Membaca file `.bag` dari Intel RealSense menggunakan library `pyrealsense2`.
    [0,  fy, cy],
    [0,  0,  1 ]]
   ```
-- Batas maksimum frame: `MAX_FRAMES = 2000`
+- Batas maksimum frame: dari `PROCESSING_CONFIG["max_bag_frames"]` (default saat ini: `20000`)
 - Menangani akhir file dengan `RuntimeError` (perilaku normal pyrealsense2)
 
 #### `services/video_generator.py` — `VideoFrameGenerator`
@@ -369,34 +390,44 @@ Kelas inti yang mengorkestrasi seluruh pemrosesan per frame. Diinisialisasi satu
 ```python
 self.detector = YOLODetector(model_path)   # Model YOLO
 self.depth    = StereoDepth()              # Depth estimator
-self.flow     = GlobalOpticalFlow()        # Optical flow
+self.flow     = GlobalOpticalFlow()        # Global optical flow (scene level)
+self.object_flow = ObjectOpticalFlow()     # Object flow (per-bbox ROI)
 self.risk_engine = RiskEngine()            # Risk calculator
 ```
 
 **Per Frame (`process_frame`):**
 1. Simpan metadata frame ke DB via `FrameRepository`
-2. Jalankan YOLO detection → untuk tiap objek: hitung jarak + risk → simpan ke DB
-3. Hitung optical flow → simpan ke DB
-4. Hitung scene risk (jumlah HIGH object) → simpan ke DB
-5. Gambar anotasi pada frame → simpan PNG via `FrameSaver`
+2. Jalankan YOLO detection
+3. Hitung global optical flow (`flow_stats` + `flow_field`) → simpan `flow_stats` ke DB
+4. Hitung object flow per deteksi dengan slicing ROI pada `flow_field`
+5. Jalankan lane segmentation (bila aktif) → simpan ke DB
+6. Untuk tiap objek: hitung jarak, lane overlap, motion score, lalu risk fusion per objek → simpan ke DB
+7. Hitung scene fusion metrics (`scene_risk_score`, `path_occupancy_risk`, `dynamic_hazard_index`, `drivable_capacity_score`, `trip_safety_score`) → simpan ke DB
+8. Gambar anotasi pada frame → simpan PNG via `FrameSaver`
 
 **Return value tiap frame:**
 ```python
 {
     "frame_id": int,
     "detections": [{"frame_id", "class_id", "confidence", "bbox",
-                    "distance_m", "risk"}, ...],
+      "distance_m", "risk", "risk_score", "lane_overlap_ratio", "object_flow"}, ...],
     "flow": {"mean_magnitude", "median_magnitude", "std_magnitude",
              "mean_dx", "mean_dy"} | None,
+  "lane": {"lane_pixel_ratio", "drivable_pixel_ratio", ...} | None,
+  "scene_metrics": {
+    "scene_risk_score", "path_occupancy_risk", "dynamic_hazard_index",
+    "drivable_capacity_score", "trip_safety_score", "alert_flag"
+  },
     "scene_risk": int,  # jumlah HIGH risk objects
     "alert": bool       # True jika scene_risk > 0
 }
 ```
 
 **Anotasi Visual (`_draw_annotations`):**
-- Bounding box berwarna: **Merah** = HIGH, **Kuning** = MEDIUM, **Hijau** = LOW
-- Label: `{class_id} | {distance}m | {risk_level}`
-- Info optical flow di pojok kiri atas: `Flow: {mean_magnitude:.2f}`
+- Bounding box berwarna berdasarkan risk + status gerak (moving objek ditampilkan dengan tone berbeda)
+- Label: `{class_id} | {distance}m | {risk_level} | MOV/STA` (MOV memuat magnitude px/frame)
+- Panah gerak ditampilkan untuk objek moving
+- Info optical flow di pojok kiri atas: `Scene Flow: {mean_magnitude:.2f} px/f`
 - Info scene risk: `Scene Risk: {scene_risk_score}`
 
 ---
@@ -461,16 +492,43 @@ Menghitung pergerakan global seluruh scene menggunakan **dense optical flow Farn
 
 **Output (per frame, kecuali frame pertama yang return `None`):**
 ```python
-{
-    "mean_magnitude":   float,  # rata-rata kecepatan piksel
-    "median_magnitude": float,  # median kecepatan piksel
-    "std_magnitude":    float,  # standar deviasi kecepatan
-    "mean_dx":          float,  # rata-rata pergerakan horizontal
-    "mean_dy":          float   # rata-rata pergerakan vertikal
+(flow_stats, flow_field)
+
+flow_stats = {
+  "mean_magnitude":   float,
+  "median_magnitude": float,
+  "std_magnitude":    float,
+  "mean_dx":          float,
+  "mean_dy":          float
 }
+
+flow_field.shape == (H, W, 2)  # [dx, dy] per pixel
 ```
 
 State `prev_gray` direset setiap kali `pipeline.reset()` dipanggil (setiap run baru).
+
+#### `core/optical_flow/object_flow.py` — `ObjectOpticalFlow`
+
+Menghitung pergerakan per objek dari `flow_field` global, dengan cara mengambil ROI sesuai bounding box setiap deteksi.
+
+Karakteristik implementasi:
+- **Stateless**: tidak menyimpan state antar frame
+- Input selalu `flow_field` terbaru dari pipeline
+- Koordinat bbox di-clamp ke batas frame untuk mencegah out-of-bound
+- Jika ROI tidak valid, hasil object flow untuk objek tersebut adalah `None`
+
+**Output per objek:**
+```python
+{
+  "object_magnitude": float,  # mean magnitude di ROI bbox (px/frame)
+  "object_dx":        float,
+  "object_dy":        float,
+  "is_moving":        bool    # object_magnitude > moving_threshold
+}
+```
+
+Threshold gerak default di konfigurasi:
+- `OBJECT_FLOW_CONFIG["moving_threshold"] = 1.5` px/frame
 
 ---
 
@@ -478,18 +536,50 @@ State `prev_gray` direset setiap kali `pipeline.reset()` dipanggil (setiap run b
 
 #### `core/calculation/risk_engine.py` — `RiskEngine`
 
-**`estimate_risk(distance_m)` — Risk per objek:**
+Risk engine kini memakai **fusion scoring**, bukan sekadar downgrade rule.
 
-| Jarak | Level Risiko |
+**`assess_object_risk(distance_m, object_flow, lane_result, bbox, class_id)` — Risk per objek:**
+
+Komponen per objek yang digabung:
+- `proximity_score` (dari distance)
+- `motion_score` (dari object flow magnitude + moving state)
+- `lane_overlap_ratio` (overlap bbox terhadap drivable area)
+- `class_weight` (bobot kelas objek)
+
+Output object-context:
+```python
+{
+  "risk": "HIGH|MEDIUM|LOW|UNKNOWN",
+  "risk_score": float,
+  "proximity_score": float,
+  "motion_score": float,
+  "lane_overlap_ratio": float,
+  "path_occupancy_risk": float,
+  "class_weight": float
+}
+```
+
+`estimate_risk(...)` tetap tersedia sebagai wrapper yang mengembalikan label final risk.
+
+**Threshold label object risk:**
+
+| Kondisi Skor | Level Risiko |
 |---|---|
-| `None` | `UNKNOWN` |
-| `< 5 meter` | `HIGH` |
-| `5 – 10 meter` | `MEDIUM` |
-| `≥ 10 meter` | `LOW` |
+| `risk_score >= object_high_threshold` | `HIGH` |
+| `risk_score >= object_medium_threshold` | `MEDIUM` |
+| selain itu | `LOW` / `UNKNOWN` (jika konteks tidak cukup) |
 
-**`compute_scene_risk(object_calcs)` — Risk level scene:**
+**`compute_scene_metrics(object_calcs, flow_stats, lane_result)` — Insight level scene:**
 
-Menghitung **jumlah objek berstatus HIGH** pada frame tersebut. Nilai ini menjadi `scene_risk_score` di tabel `scene_metrics`, dan jika score > 0 maka `alert_flag = 1`.
+Metrik scene yang dihasilkan:
+- `scene_risk_score`: jumlah objek berlabel `HIGH`
+- `path_occupancy_risk`: akumulasi risiko objek pada area drivable
+- `dynamic_hazard_index`: indeks hazard dinamis gabungan object risk + occupancy + flow
+- `drivable_capacity_score`: kapasitas area drivable tersisa setelah dikurangi occupancy risk
+- `trip_safety_score`: skor keselamatan agregat frame-level
+- `alert_flag`: status alert gabungan rule scene
+
+`compute_scene_risk(object_calcs)` tetap ada sebagai utilitas untuk menghitung jumlah objek HIGH risk.
 
 ---
 
@@ -540,20 +630,21 @@ Menghasilkan file audio WAV dengan sinyal peringatan.
 |---|---|
 | `get_connection()` | Buka koneksi SQLite ke `perception.db` |
 | `init_database()` | Buat tabel jika belum ada (mengeksekusi `schema.sql`) |
-| `reset_database()` | Hapus isi 4 tabel (`DELETE FROM`) tanpa menghapus struktur tabel |
+| `reset_database()` | Hapus isi 5 tabel (`DELETE FROM`) tanpa menghapus struktur tabel |
 
 Path database: `assistance_car/perception.db` (relatif terhadap root modul).
 
 #### `database/repository.py`
 
-Lima kelas repository mengikuti pola **Repository Pattern** untuk memisahkan logika akses data:
+Enam kelas repository mengikuti pola **Repository Pattern** untuk memisahkan logika akses data:
 
 | Repository | Operasi | Tabel |
 |---|---|---|
 | `FrameRepository` | `insert(frame_data)` | `frames` |
 | `DetectionRepository` | `insert(det)` | `detections` |
 | `OpticalFlowRepository` | `insert(frame_id, flow_stats)` | `optical_flow` |
-| `SceneRepository` | `insert(frame_id, scene_risk, alert_flag)` | `scene_metrics` |
+| `SceneRepository` | `insert(frame_id, scene_metrics)` | `scene_metrics` |
+| `LaneRepository` | `insert(frame_id, lane_stats)` | `lane_metrics` |
 | `AnalyticsRepository` | `summary()` | Semua tabel (SELECT) |
 
 `AnalyticsRepository.summary()` mengembalikan:
@@ -562,7 +653,16 @@ Lima kelas repository mengikuti pola **Repository Pattern** untuk memisahkan log
     "total_frames":     int,
     "total_detections": int,
     "high_risk_objects": int,
-    "avg_flow":         float | None
+  "avg_object_risk_score": float | None,
+  "avg_lane_overlap_ratio": float | None,
+    "avg_flow":         float | None,
+  "avg_scene_risk_score": float | None,
+  "avg_path_occupancy_risk": float | None,
+  "avg_dynamic_hazard_index": float | None,
+  "avg_drivable_capacity_score": float | None,
+  "avg_trip_safety_score": float | None,
+    "avg_lane_ratio":   float | None,
+    "avg_drivable_ratio": float | None
 }
 ```
 
@@ -617,7 +717,7 @@ Menyimpan metadata setiap frame yang diproses.
 | `cy` | REAL | Principal point Y |
 
 ### Tabel `detections`
-Menyimpan setiap objek yang terdeteksi beserta estimasi jarak dan level risikonya.
+Menyimpan setiap objek yang terdeteksi beserta estimasi jarak, level risiko, dan metrik object flow.
 
 | Kolom | Tipe | Keterangan |
 |---|---|---|
@@ -631,6 +731,12 @@ Menyimpan setiap objek yang terdeteksi beserta estimasi jarak dan level risikony
 | `bbox_y2` | REAL | Koordinat bawah bounding box |
 | `distance_m` | REAL | Jarak estimasi ke objek (meter) |
 | `risk_level` | TEXT | `HIGH` / `MEDIUM` / `LOW` / `UNKNOWN` |
+| `risk_score` | REAL | Skor risiko objek hasil fusion |
+| `lane_overlap_ratio` | REAL | Rasio overlap bbox dengan area drivable |
+| `object_flow_magnitude` | REAL | Mean magnitude flow pada ROI objek (px/frame) |
+| `object_flow_dx` | REAL | Rata-rata komponen horizontal flow ROI objek |
+| `object_flow_dy` | REAL | Rata-rata komponen vertikal flow ROI objek |
+| `is_moving` | INTEGER | `1` moving, `0` stationary, `NULL` jika flow belum tersedia |
 
 ### Tabel `optical_flow`
 Menyimpan statistik optical flow global per frame.
@@ -651,15 +757,60 @@ Menyimpan penilaian risiko tingkat scene per frame.
 |---|---|---|
 | `frame_id` | INTEGER PK FK | Referensi ke tabel frames |
 | `scene_risk_score` | REAL | Jumlah objek HIGH risk di frame ini |
-| `alert_flag` | INTEGER | `1` jika scene_risk_score > 0, `0` jika tidak |
+| `path_occupancy_risk` | REAL | Risiko okupansi path berdasarkan objek pada drivable area |
+| `dynamic_hazard_index` | REAL | Indeks hazard dinamis gabungan objek + flow + occupancy |
+| `drivable_capacity_score` | REAL | Kapasitas area drivable tersisa |
+| `trip_safety_score` | REAL | Skor keselamatan agregat frame-level |
+| `alert_flag` | INTEGER | `1` jika alert rule terpenuhi, `0` jika tidak |
+
+### Tabel `lane_metrics`
+Menyimpan statistik segmentasi lane/drivable per frame.
+
+| Kolom | Tipe | Keterangan |
+|---|---|---|
+| `frame_id` | INTEGER PK FK | Referensi ke tabel frames |
+| `lane_pixel_ratio` | REAL | Persentase piksel lane terhadap frame |
+| `drivable_pixel_ratio` | REAL | Persentase area drivable terhadap frame |
+
+### Tabel `performance_metrics`
+Menyimpan metrik performa inferensi per frame untuk evaluasi sistem.
+
+| Kolom | Tipe | Keterangan |
+|---|---|---|
+| `frame_id` | INTEGER PK FK | Referensi ke tabel frames |
+| `yolo_ms` | REAL | Waktu inferensi deteksi YOLO (ms) |
+| `global_flow_ms` | REAL | Waktu komputasi global optical flow (ms) |
+| `object_flow_ms` | REAL | Waktu komputasi object optical flow (ms) |
+| `lane_ms` | REAL | Waktu inferensi lane/drivable segmentation (ms) |
+| `risk_ms` | REAL | Waktu perhitungan depth + risk per object (ms) |
+| `scene_ms` | REAL | Waktu perhitungan scene fusion metrics (ms) |
+| `annotation_ms` | REAL | Waktu render anotasi frame (ms) |
+| `pipeline_total_ms` | REAL | Total waktu proses pipeline per frame (ms) |
+| `pipeline_fps` | REAL | FPS estimasi per frame ($FPS = 1000 / ms$) |
+| `detection_count` | INTEGER | Jumlah objek terdeteksi pada frame |
 
 **Diagram Relasi:**
 ```
 frames (frame_id PK)
   ├── detections.frame_id (FK)
   ├── optical_flow.frame_id (FK, PK)
-  └── scene_metrics.frame_id (FK, PK)
+  ├── scene_metrics.frame_id (FK, PK)
+  ├── lane_metrics.frame_id (FK, PK)
+  └── performance_metrics.frame_id (FK, PK)
 ```
+
+### Metrik yang Ditampilkan
+
+UI FastAPI (card Performance Evaluation):
+- Inference time per fitur/model: YOLO, global flow, object flow, lane, risk, scene, annotation
+- Inference keseluruhan: average total latency, min/max latency
+- Distribusi latency: P50 dan P95 total latency
+- Throughput: average FPS
+- Kompleksitas scene: average detection per frame
+
+Overlay video/realtime:
+- Per-frame total inference time (ms)
+- Per-frame FPS
 
 ---
 
@@ -741,15 +892,15 @@ python run_backend.py --source "C:/path/to/video.mp4" --type mp4
 
 ## 10. Catatan Pengembangan Lanjutan
 
-Berdasarkan README awal dan kode yang sudah ada, berikut komponen yang sudah tersedia strukturnya namun belum diimplementasi sepenuhnya:
+Berikut status komponen lanjutan saat ini:
 
 | Komponen | Status | Keterangan |
 |---|---|---|
 | `core/frame_processor.py` | Kosong | Placeholder untuk future frame preprocessing |
-| `core/lane/` | Kosong | Dirancang untuk lane detection |
+| `core/lane/` | Aktif | TwinLiteNetPlus lane + drivable segmentation sudah terintegrasi |
 | `core/detection/rf_detr_detector.py` | Belum ada | Alternatif detector (RF-DETR) |
 | `core/depth/depth_anything.py` | Belum ada | Depth estimation monocular (tanpa stereo) |
-| `core/optical_flow/object_flow.py` | Belum ada | Per-object optical flow (bukan global) |
+| `core/optical_flow/object_flow.py` | Aktif | Object-level flow stateless berbasis ROI bbox |
 | `core/calculation/fusion_engine.py` | Belum ada | Fusion dari berbagai sinyal risk |
 | `core/calculation/metrics.py` | Belum ada | Metrics evaluation |
 | Output video playback di UI | Aktif | Preview video + audio tersedia di halaman FastAPI |

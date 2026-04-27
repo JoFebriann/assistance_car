@@ -7,7 +7,7 @@ OUTPUT_DIR = ASSETS_DIR / "output"
 TEMP_FRAMES_DIR = ASSETS_DIR / "temp_frames"
 LOG_DIR = BASE_DIR / "logs"
 
-MODEL_PATH = BASE_DIR / "assets" / "models" / "yolo.pt"
+YOLO_MODEL_PATH = BASE_DIR / "assets" / "models" / "yolo.pt"
 LANE_MODEL_PATH = BASE_DIR / "assets" / "models" / "lane_twinlitenet_best.pth"
 
 DB_PATH = BASE_DIR / "perception.db"
@@ -15,7 +15,8 @@ SCHEMA_PATH = BASE_DIR / "database" / "schema.sql"
 
 PROCESSING_CONFIG = {
 	"default_fps": 30.0,
-	"max_bag_frames": 2000,
+	# "max_bag_frames": 2000,
+ 	"max_bag_frames": 20000,
 	"clean_temp_frames_on_start": True,
 }
 
@@ -27,6 +28,28 @@ RISK_CONFIG = {
 	"high_distance_m": 5.0,
 	"medium_distance_m": 10.0,
 	"min_valid_depth_pixels": 10,
+}
+
+RISK_FUSION_CONFIG = {
+	"object_high_threshold": 70.0,
+	"object_medium_threshold": 45.0,
+	"proximity_weight": 0.45,
+	"motion_weight": 0.20,
+	"lane_weight": 0.15,
+	"flow_weight": 0.20,
+	"path_occupancy_weight": 0.25,
+	"hazard_weight": 0.55,
+	"capacity_weight": 0.45,
+	"moving_object_bias": 20.0,
+	"flow_normalizer": 6.0,
+	"class_weights": {
+		0: 1.35,
+		1: 1.20,
+		2: 1.00,
+		3: 1.15,
+		5: 1.05,
+		7: 1.05,
+	},
 }
 
 FLOW_CONFIG = {
@@ -63,7 +86,11 @@ AUDIO_ALERT_CONFIG = {
 
 UI_CONFIG = {
 	"title": "Assistance Car Perception System",
-	"max_upload_size_note": "Gunakan file MP4 atau path lokal BAG yang valid.",
+	"max_upload_size_note": "Sementara gunakan path lokal BAG yang valid (opsi MP4 sedang dinonaktifkan).",
+}
+
+ANNOTATION_CONFIG = {
+	"bbox_thickness": 0.5,
 }
 
 REALSENSE_CONFIG = {

@@ -32,6 +32,7 @@ def reset_database():
     cur.execute("DELETE FROM optical_flow")
     cur.execute("DELETE FROM lane_metrics")
     cur.execute("DELETE FROM scene_metrics")
+    cur.execute("DELETE FROM performance_metrics")
     cur.execute("DELETE FROM frames")
 
     # Reset autoincrement counter for detections so IDs restart from 1
