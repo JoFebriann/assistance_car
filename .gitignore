@@ -75,6 +75,7 @@ assets/temp_frames/
 *.bak
 *.backup
 .tmp/
+*.csv
 
 # ==========================================
 # OS-specific
@@ -108,3 +109,4 @@ predictions/
 .pytest_cache/
 htmlcov/
 .coverage
+services/__init__.py

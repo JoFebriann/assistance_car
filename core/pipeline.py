@@ -26,11 +26,12 @@ import time
 
 class PerceptionPipeline:
 
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, detector_device: str | None = None):
         self.logger = get_logger("Pipeline")
 
         # Models
-        self.detector = YOLODetector(model_path)
+        # Pass detector device through to YOLO wrapper (None -> auto)
+        self.detector = YOLODetector(model_path, device=detector_device)
         self.depth = StereoDepth()
         self.flow = GlobalOpticalFlow()
         self.object_flow = ObjectOpticalFlow()   # stateless — slices flow ROI per bbox
@@ -74,7 +75,7 @@ class PerceptionPipeline:
         #    flow_field is a fresh (H, W, 2) numpy array for *this* frame pair;
         #    it is never stored on GlobalOpticalFlow — we pass it forward explicitly.
         t_flow = time.perf_counter()
-        flow_result = self.flow.compute(frame_data.rgb_image)
+        flow_result = self.flow.compute(frame_data.rgb_image, frame_id=frame_id)
         flow_stats: dict | None = None
         flow_field: np.ndarray | None = None
 
@@ -109,12 +110,13 @@ class PerceptionPipeline:
         lane_ms = 0.0
         if self.lane_detector is not None:
             t_lane = time.perf_counter()
-            lane_result = self.lane_detector.detect(frame_data.rgb_image)
+            lane_result = self.lane_detector.detect(frame_data.rgb_image, frame_id=frame_id)
             self.lane_repo.insert(frame_id, lane_result)
             lane_ms = (time.perf_counter() - t_lane) * 1000.0
+            reuse_tag = " (reused)" if lane_result.get("is_reused") else ""
             self.logger.info(
                 f"[Frame {frame_id}] Lane ratio={lane_result['lane_pixel_ratio']:.4f}, "
-                f"Drivable ratio={lane_result['drivable_pixel_ratio']:.4f}"
+                f"Drivable ratio={lane_result['drivable_pixel_ratio']:.4f}{reuse_tag}"
             )
 
         # 6️⃣ Per-object: depth → object flow → fused risk

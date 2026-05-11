@@ -594,8 +594,10 @@ def _render_page(
           <option value='bag'>bag</option>
         </select>
 
+        <!--
         <label for='bag_file'>Upload BAG File (opsional, untuk bag source)</label>
         <input id='bag_file' name='bag_file' type='file' accept='.bag'>
+        -->
 
         <!--
         <label for='file'>Upload MP4 File (for mp4 source)</label>

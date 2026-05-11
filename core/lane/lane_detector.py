@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,10 @@ class LaneDetector:
 
         self.input_h = int(LANE_CONFIG["input_h"])
         self.input_w = int(LANE_CONFIG["input_w"])
+        self.process_every_n_frames = max(1, int(LANE_CONFIG.get("process_every_n_frames", 1)))
+        self.reuse_previous_frame = bool(LANE_CONFIG.get("reuse_previous_frame", True))
+        self._last_result: dict[str, Any] | None = None
+        self._last_inferred_frame_id: int | None = None
 
         self.model_size = str(LANE_CONFIG["model_size"])
         checkpoint = torch.load(self.model_path, map_location=self.device)
@@ -64,7 +69,22 @@ class LaneDetector:
             self.device,
         )
 
-    def detect(self, rgb_image: np.ndarray) -> dict[str, Any]:
+    def detect(self, rgb_image: np.ndarray, frame_id: int | None = None) -> dict[str, Any]:
+        should_run = True
+        if (
+            frame_id is not None
+            and self.process_every_n_frames > 1
+            and self._last_result is not None
+            and self.reuse_previous_frame
+        ):
+            should_run = frame_id % self.process_every_n_frames == 0
+
+        if not should_run and self._last_result is not None:
+            reused = copy.deepcopy(self._last_result)
+            reused["is_reused"] = True
+            reused["source_frame_id"] = self._last_inferred_frame_id
+            return reused
+
         h_orig, w_orig = rgb_image.shape[:2]
         resized = cv2.resize(rgb_image, (self.input_w, self.input_h), interpolation=cv2.INTER_LINEAR)
 
@@ -84,9 +104,15 @@ class LaneDetector:
         lane_ratio = float((ll_mask == 1).sum() / ll_mask.size)
         drivable_ratio = float((da_mask == 1).sum() / da_mask.size)
 
-        return {
+        result = {
             "da_mask": da_mask,
             "ll_mask": ll_mask,
             "lane_pixel_ratio": lane_ratio,
             "drivable_pixel_ratio": drivable_ratio,
+            "is_reused": False,
+            "source_frame_id": frame_id,
         }
+
+        self._last_result = copy.deepcopy(result)
+        self._last_inferred_frame_id = frame_id
+        return result

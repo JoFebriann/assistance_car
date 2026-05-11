@@ -22,6 +22,10 @@ PROCESSING_CONFIG = {
 
 YOLO_CONFIG = {
 	"confidence_threshold": 0.25,
+	"input_resize_enabled": True,
+	"input_width": 416,
+	"input_height": 320,
+	"fp16_enabled": True,
 }
 
 RISK_CONFIG = {
@@ -59,7 +63,7 @@ FLOW_CONFIG = {
 	"pyr_scale": 0.5,
 	"levels": 3,
 	"winsize": 15,
-	"iterations": 3,
+	"iterations": 2,
 	"poly_n": 5,
 	"poly_sigma": 1.2,
 	"flags": 0,
@@ -108,9 +112,21 @@ REALSENSE_CONFIG = {
 LANE_CONFIG = {
 	"enabled": True,
 	"model_size": "small",
-	"input_h": 360,
-	"input_w": 640,
-	"device": "cpu",
+	"input_h": 288,
+	"input_w": 512,
+	"process_every_n_frames": 2,
+	"reuse_previous_frame": True,
+	"device": "cuda",
+}
+
+FLOW_OPTIMIZATION_CONFIG = {
+	"batch_enabled": True,
+	"batch_size": 2,
+	"resolution_reduction_enabled": True,
+	"resolution_scale": 0.5,  # Compute flow at 50% resolution (25% memory/compute)
+	"skip_enabled": True,
+	"skip_every_n_frames": 2,  # Compute flow every 2 frames, reuse for in-between
+	"reuse_previous_flow": True,
 }
 
 GUIDANCE_CONFIG = {
