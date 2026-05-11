@@ -4,6 +4,7 @@ from core.optical_flow.global_flow import GlobalOpticalFlow
 from core.optical_flow.object_flow import ObjectOpticalFlow
 from core.lane.lane_detector import LaneDetector
 from core.calculation.risk_engine import RiskEngine
+from core.calculation.guidance_interpreter import GuidanceInterpreter
 from config.settings import LANE_CONFIG
 from config.settings import ANNOTATION_CONFIG
 
@@ -53,7 +54,7 @@ class PerceptionPipeline:
         self.flow.reset()
         self.logger.info("Pipeline state reset.")
 
-    def process_frame(self, frame_data, frame_saver=None):
+    def process_frame(self, frame_data, frame_saver=None, annotation_mode: str = "information"):
 
         frame_id = frame_data.frame_id
         self.logger.info(f"Processing frame {frame_id}")
@@ -195,8 +196,10 @@ class PerceptionPipeline:
                 calculations,
                 flow_stats,
                 scene_risk,
-                lane_result,
+                scene_metrics=scene_metrics,
+                lane_result=lane_result,
                 perf_stats=perf_overlay,
+                annotation_mode=annotation_mode,
             )
             frame_saver.save(frame_id, annotated_frame)
             annotation_ms = (time.perf_counter() - t_annotation) * 1000.0
@@ -258,8 +261,10 @@ class PerceptionPipeline:
         calculations: list,
         flow_stats: dict | None,
         scene_risk: int,
+        scene_metrics: dict | None = None,
         lane_result: dict | None = None,
         perf_stats: dict | None = None,
+        annotation_mode: str = "information",
     ) -> np.ndarray:
 
         frame_bgr = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
@@ -292,6 +297,10 @@ class PerceptionPipeline:
 
             # Bounding box
             cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), color, bbox_thickness)
+
+            if annotation_mode == "driving":
+                # Driving mode keeps the view simple: no technical text per object.
+                continue
 
             # Distance text
             distance = det.get("distance_m")
@@ -353,6 +362,15 @@ class PerceptionPipeline:
                     )
 
         # ── Scene-level HUD ──────────────────────────────────────────────────
+        if annotation_mode == "driving":
+            self._draw_driving_guidance_hud(
+                frame_bgr=frame_bgr,
+                calculations=calculations,
+                scene_metrics=scene_metrics,
+                perf_stats=perf_stats,
+            )
+            return frame_bgr
+
         hud_y = 30
         if flow_stats:
             cv2.putText(
@@ -409,3 +427,87 @@ class PerceptionPipeline:
                 )
 
         return frame_bgr
+
+    def _draw_driving_guidance_hud(
+        self,
+        *,
+        frame_bgr: np.ndarray,
+        calculations: list,
+        scene_metrics: dict | None,
+        perf_stats: dict | None,
+    ) -> None:
+        """Draw concise guidance HUD for non-technical driving mode."""
+        h, w = frame_bgr.shape[:2]
+        metrics = {
+            "avg_trip_safety_score": float((scene_metrics or {}).get("trip_safety_score", 0.0) or 0.0),
+            "avg_drivable_capacity_score": float((scene_metrics or {}).get("drivable_capacity_score", 0.0) or 0.0),
+            "avg_path_occupancy_risk": float((scene_metrics or {}).get("path_occupancy_risk", 0.0) or 0.0),
+            "avg_detection_per_frame": float(len(calculations)),
+            "avg_pipeline_fps": float((perf_stats or {}).get("pipeline_fps", 0.0) or 0.0),
+        }
+        guidance = GuidanceInterpreter.generate_guidance(metrics)
+
+        status_text = str(guidance.get("overall_status_emoji", ""))
+        main_action = str(guidance.get("main_action", ""))
+        traffic_text = str(guidance.get("traffic_condition_text", ""))
+
+        # Color by safety status label.
+        status_label = status_text.upper()
+        if "KRITIS" in status_label or "BERBAHAYA" in status_label:
+            panel_color = (30, 30, 180)
+        elif "HATI-HATI" in status_label:
+            panel_color = (0, 160, 220)
+        else:
+            panel_color = (40, 140, 40)
+
+        panel_x1, panel_y1 = 12, 12
+        panel_x2, panel_y2 = min(w - 12, 540), min(h - 12, 160)
+
+        overlay = frame_bgr.copy()
+        cv2.rectangle(overlay, (panel_x1, panel_y1), (panel_x2, panel_y2), (15, 25, 30), -1)
+        frame_bgr[:] = cv2.addWeighted(overlay, 0.52, frame_bgr, 0.48, 0)
+        cv2.rectangle(frame_bgr, (panel_x1, panel_y1), (panel_x2, panel_y2), panel_color, 2)
+
+        cv2.putText(
+            frame_bgr,
+            status_text,
+            (panel_x1 + 14, panel_y1 + 32),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.75,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            frame_bgr,
+            main_action,
+            (panel_x1 + 14, panel_y1 + 67),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.58,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            frame_bgr,
+            f"Lalu lintas: {traffic_text}",
+            (panel_x1 + 14, panel_y1 + 100),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.52,
+            (220, 240, 255),
+            2,
+            cv2.LINE_AA,
+        )
+
+        fps = float((perf_stats or {}).get("pipeline_fps", 0.0) or 0.0)
+        if fps > 0:
+            cv2.putText(
+                frame_bgr,
+                f"FPS: {fps:.1f}",
+                (panel_x1 + 14, panel_y1 + 130),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (220, 220, 220),
+                1,
+                cv2.LINE_AA,
+            )

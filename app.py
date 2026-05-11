@@ -6,11 +6,12 @@ import shutil
 import tempfile
 import time
 
-from fastapi import FastAPI, File, Form, UploadFile, Request
+from fastapi import FastAPI, File, Form, UploadFile, Request, Query
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from config.settings import YOLO_MODEL_PATH, OUTPUT_DIR, UI_CONFIG
+from config.settings import YOLO_MODEL_PATH, OUTPUT_DIR, UI_CONFIG, GUIDANCE_CONFIG
+from core.calculation.guidance_interpreter import GuidanceInterpreter
 from database.db import init_database
 from database.repository import AnalyticsRepository
 from services.realtime_stream_service import RealSenseRealtimeService
@@ -62,10 +63,13 @@ def camera_stream():
 
 
 @app.get("/realtime/stream")
-def realtime_stream():
+def realtime_stream(mode: str = Query(default="information")):
     """MJPEG endpoint for processed RealSense realtime stream."""
+    stream_mode = (mode or "information").strip().lower()
+    if stream_mode not in {"information", "driving"}:
+        stream_mode = "information"
     return StreamingResponse(
-        realtime_service.stream(),
+        realtime_service.stream(annotation_mode=stream_mode),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
 
@@ -129,7 +133,8 @@ async def stream_video(filename: str, request: Request):
 def _render_page(
     *,
     message: str = "",
-    output_video_name: str = "",
+  output_run_id: str = "",
+  output_video_mode: str = "information",
     elapsed_seconds: float | None = None,
 ):
     analytics = AnalyticsRepository()
@@ -169,27 +174,102 @@ def _render_page(
     if elapsed_seconds is not None:
         elapsed_text = f"<p><strong>Processing time:</strong> {elapsed_seconds:.2f} seconds</p>"
 
+    # ── Generate guidance interpretation ──────────────────────────────────────
+    guidance = GuidanceInterpreter.generate_guidance(summary)
+    guidance_status_emoji = guidance.get("overall_status_emoji", "❓")
+    guidance_action = escape(guidance.get("main_action", ""))
+    guidance_jalan = escape(guidance.get("jalan_condition", ""))
+    guidance_occupancy = escape(guidance.get("occupancy_detail", ""))
+    guidance_traffic = escape(guidance.get("traffic_condition_text", ""))
+    guidance_system = escape(guidance.get("system_health_text", ""))
+    guidance_fps = escape(guidance.get("system_fps", ""))
+    guidance_recs = guidance.get("recommendations", [])
+    guidance_breakdown = guidance.get("detailed_breakdown", {})
+
+    # Format recommendations HTML
+    guidance_recs_html = ""
+    if guidance_recs:
+        recs_items = "".join(f"<li>{escape(rec)}</li>" for rec in guidance_recs)
+        guidance_recs_html = f"""
+        <div class='guidance-recommendations'>
+          <h4>📍 Rekomendasi:</h4>
+          <ul>
+            {recs_items}
+          </ul>
+        </div>
+        """
+
+    # Build guidance card
+    guidance_card_html = f"""
+    <div class='guidance-card'>
+      <div class='guidance-header'>
+        <div class='guidance-status-emoji'>{guidance_status_emoji}</div>
+        <div class='guidance-main'>
+          <h2>Kondisi Perjalanan Anda</h2>
+          <p class='guidance-action'>{guidance_action}</p>
+        </div>
+      </div>
+
+      <div class='guidance-breakdown'>
+        <div class='guidance-item'>
+          <div class='guidance-item-label'>🛣️ Kondisi Jalan</div>
+          <div class='guidance-item-value'>{guidance_jalan}</div>
+        </div>
+        <div class='guidance-item'>
+          <div class='guidance-item-label'>🚛 Lalu Lintas</div>
+          <div class='guidance-item-value'>{guidance_traffic}</div>
+        </div>
+        <div class='guidance-item'>
+          <div class='guidance-item-label'>📊 Pengisian Lajur</div>
+          <div class='guidance-item-value'>{guidance_occupancy}</div>
+        </div>
+        <div class='guidance-item'>
+          <div class='guidance-item-label'>⚡ Kesehatan Sistem</div>
+          <div class='guidance-item-value'>{guidance_system} ({guidance_fps})</div>
+        </div>
+      </div>
+
+      {guidance_recs_html}
+    </div>
+    """
+
     # ── video panel ──────────────────────────────────────────────────────────
     # Uses the dedicated /video/<filename> endpoint (Range-Request aware) so
     # Chrome can play, seek, and scrub the output clip without issues.
     video_html = ""
-    if output_video_name:
-        safe_name = escape(output_video_name)
-        video_src = f"/video/{safe_name}"
-        download_src = f"/media/output/{safe_name}"
+    if output_run_id:
+        safe_run = escape(output_run_id)
+        info_name = f"{safe_run}_information.mp4"
+        driving_name = f"{safe_run}_driving.mp4"
+
+        if output_video_mode not in {"information", "driving"}:
+            output_video_mode = "information"
+        selected_name = info_name if output_video_mode == "information" else driving_name
+
         video_html = f"""
         <h3>Output Video (dengan Audio Alert)</h3>
+        <label for='output-video-mode'>Mode Video Hasil</label>
+        <select id='output-video-mode' style='max-width:320px; margin-bottom:10px;'>
+          <option value='information' {"selected" if output_video_mode == "information" else ""}>📊 Information Video (detail teknis)</option>
+          <option value='driving' {"selected" if output_video_mode == "driving" else ""}>🚗 Driving Video (guidance ringkas)</option>
+        </select>
         <video
           id="output-video"
           controls
           width="840"
           preload="metadata"
+          data-info-src="/video/{info_name}"
+          data-driving-src="/video/{driving_name}"
           style="background:#000; display:block; max-width:100%; border-radius:8px;"
         >
-          <source src="{video_src}" type="video/mp4">
+          <source src="/video/{selected_name}" type="video/mp4">
           Browser Anda tidak support HTML5 video.
         </video>
-        <p><a href="{download_src}" download>⬇ Download video</a></p>
+        <p>
+          <a id='download-info-video' href='/media/output/{info_name}' download>⬇ Download Information Video</a>
+          &nbsp;|&nbsp;
+          <a id='download-driving-video' href='/media/output/{driving_name}' download>⬇ Download Driving Video</a>
+        </p>
         """
 
     return f"""
@@ -340,10 +420,165 @@ def _render_page(
       background: #dcfce7;
       color: #15803d;
     }}
+
+    /* ── Guidance Interpretation Mode ── */
+    .mode-selector {{
+      display: flex;
+      gap: 8px;
+      margin-bottom: 16px;
+      align-items: center;
+    }}
+    .mode-button {{
+      padding: 8px 16px;
+      border-radius: 8px;
+      border: 2px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      font-size: 0.9rem;
+    }}
+    .mode-button.active {{
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }}
+    .mode-button:hover {{
+      border-color: var(--accent);
+    }}
+
+    /* ── Guidance Card (Layperson-friendly) ── */
+    .guidance-card {{
+      background: linear-gradient(135deg, #ffffff 0%, #f5faf9 100%);
+      border-radius: 14px;
+      padding: 20px;
+      margin-bottom: 18px;
+      border: 2px solid var(--line);
+    }}
+    .guidance-header {{
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 16px;
+      padding-bottom: 12px;
+      border-bottom: 2px solid var(--line);
+    }}
+    .guidance-status-emoji {{
+      font-size: 3rem;
+      line-height: 1;
+    }}
+    .guidance-main {{
+      flex: 1;
+    }}
+    .guidance-main h2 {{
+      margin: 0 0 4px 0;
+      font-size: 1.3rem;
+      color: var(--ink);
+    }}
+    .guidance-action {{
+      font-size: 1.05rem;
+      font-weight: 600;
+      margin: 0;
+      color: var(--muted);
+    }}
+    .guidance-breakdown {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 12px;
+      margin-bottom: 14px;
+    }}
+    .guidance-item {{
+      background: #fff;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 12px;
+      font-size: 0.95rem;
+    }}
+    .guidance-item-label {{
+      font-weight: 600;
+      color: var(--muted);
+      font-size: 0.85rem;
+      margin-bottom: 4px;
+    }}
+    .guidance-item-value {{
+      color: var(--ink);
+      font-weight: 500;
+    }}
+    .guidance-recommendations {{
+      background: #fffbeb;
+      border-left: 4px solid #f59e0b;
+      border-radius: 6px;
+      padding: 12px;
+      margin-top: 14px;
+    }}
+    .guidance-recommendations h4 {{
+      margin: 0 0 8px 0;
+      color: #b45309;
+      font-size: 0.95rem;
+    }}
+    .guidance-recommendations ul {{
+      margin: 0;
+      padding-left: 20px;
+      color: #78350f;
+      font-size: 0.9rem;
+    }}
+    .guidance-recommendations li {{
+      margin: 4px 0;
+      line-height: 1.4;
+    }}
+
+    /* ── Hidden elements for mode switching ── */
+    .information-mode .perception-summary,
+    .information-mode .performance-evaluation {{
+      display: block;
+    }}
+    .driving-mode .perception-summary,
+    .driving-mode .performance-evaluation {{
+      display: none;
+    }}
+    .driving-mode .guidance-card {{
+      display: block;
+    }}
+    .information-mode .guidance-card {{
+      display: block;
+    }}
   </style>
 </head>
 <body>
+  <script>
+    // Default mode on page load
+    document.addEventListener('DOMContentLoaded', function() {{
+      // Check for saved mode preference
+      let mode = localStorage.getItem('displayMode') || '{escape(GUIDANCE_CONFIG.get("default_mode", "information"))}';
+      setDisplayMode(mode);
+    }});
+
+    function setDisplayMode(mode) {{
+      localStorage.setItem('displayMode', mode);
+      document.body.className = mode + '-mode';
+      
+      // Update button states
+      document.querySelectorAll('.mode-button').forEach(btn => {{
+        btn.classList.remove('active');
+      }});
+      document.querySelector(`[data-mode="${{mode}}"]`).classList.add('active');
+    }}
+  </script>
   <div class='container'>
+
+    <!-- ── Top Mode Selector ── -->
+    <div class='card'>
+      <div class='mode-selector'>
+        <span style='font-weight:600; color:var(--muted);'>Mode Tampilan:</span>
+        <button class='mode-button active' data-mode='information' onclick='setDisplayMode("information")'>
+          📊 Information Mode (Semua Data)
+        </button>
+        <button class='mode-button' data-mode='driving' onclick='setDisplayMode("driving")'>
+          🚗 Driving Mode (Mode Awam)
+        </button>
+      </div>
+    </div>
 
     <div class='card'>
       <h1>{escape(UI_CONFIG['title'])}</h1>
@@ -378,8 +613,12 @@ def _render_page(
       </form>
     </div>
 
-    <div class='card'>
-      <h2>Perception Summary</h2>
+    <!-- Guidance Card (shown in both Information and Driving modes) -->
+    {guidance_card_html}
+
+    <!-- Technical Metrics (hidden in Driving mode) -->
+    <div class='card perception-summary'>
+      <h2>Perception Summary (Technical)</h2>
       <div class='row'>
         <div class='metric'><strong>Total Frames</strong><br>{total_frames}</div>
         <div class='metric'><strong>Total Detections</strong><br>{total_detections}</div>
@@ -397,7 +636,7 @@ def _render_page(
       </div>
     </div>
 
-    <div class='card'>
+    <div class='card performance-evaluation'>
       <h2>Performance Evaluation</h2>
       <div class='row'>
         <div class='metric'><strong>Avg Total Inference</strong><br>{avg_pipeline_total_ms:.2f} ms</div>
@@ -466,6 +705,11 @@ def _render_page(
           <strong>RealSense Realtime Processed Feed</strong>
           <span id='rs-badge' class='cam-badge'>● OFFLINE</span>
         </p>
+        <label for='realtime-mode-select' style='margin-bottom:8px;'>Mode Realtime Overlay</label>
+        <select id='realtime-mode-select' style='max-width:320px; margin-bottom:10px;'>
+          <option value='information'>📊 Information Mode (teknis)</option>
+          <option value='driving'>🚗 Driving Mode (guidance ringkas)</option>
+        </select>
         <p class='muted' style='margin-top:0; font-size:0.9rem;'>
           Menangkap frame color + depth dari kamera stereo RealSense,
           lalu memproses deteksi, depth estimation, optical flow, dan risk secara near real-time.
@@ -514,6 +758,24 @@ def _render_page(
 
     modeSelect.addEventListener('change', () => switchPanel(modeSelect.value));
 
+    // ── Output video mode selector (information vs driving file) ───────────
+    const outputVideo = document.getElementById('output-video');
+    const outputVideoMode = document.getElementById('output-video-mode');
+    if (outputVideo && outputVideoMode) {{
+      outputVideoMode.addEventListener('change', () => {{
+        const selected = outputVideoMode.value;
+        const src = selected === 'driving'
+          ? outputVideo.getAttribute('data-driving-src')
+          : outputVideo.getAttribute('data-info-src');
+        if (!src) return;
+
+        const sourceEl = outputVideo.querySelector('source');
+        if (!sourceEl) return;
+        sourceEl.src = src;
+        outputVideo.load();
+      }});
+    }}
+
     // ── Camera stream controls ───────────────────────────────────────────────
     const camFeed    = document.getElementById('cam-feed');
     const camBadge   = document.getElementById('cam-badge');
@@ -551,9 +813,11 @@ def _render_page(
     const rsBadge   = document.getElementById('rs-badge');
     const btnStartRs = document.getElementById('btn-start-rs');
     const btnStopRs  = document.getElementById('btn-stop-rs');
+    const realtimeModeSelect = document.getElementById('realtime-mode-select');
 
     function startRs() {{
-      rsFeed.src = '/realtime/stream?t=' + Date.now();
+      const selectedRealtimeMode = realtimeModeSelect ? realtimeModeSelect.value : 'information';
+      rsFeed.src = '/realtime/stream?mode=' + encodeURIComponent(selectedRealtimeMode) + '&t=' + Date.now();
       rsFeed.onerror = () => {{
         rsBadge.textContent = '● ERROR';
         rsBadge.className   = 'cam-badge';
@@ -656,14 +920,24 @@ async def process(
         service = VideoService(YOLO_MODEL_PATH)
 
         start = time.time()
-        output_video_path = service.process(str(source_path), source_type)
+        process_result = service.process(str(source_path), source_type)
         elapsed = time.time() - start
 
-        output_video_name = Path(output_video_path).name
+        output_run_id = ""
+        if isinstance(process_result, dict):
+          output_run_id = str(process_result.get("run_id") or "")
+        else:
+          # Backward-compat fallback if service still returns a single path.
+          output_run_id = Path(process_result).stem
+          if output_run_id.endswith("_information"):
+            output_run_id = output_run_id[: -len("_information")]
+          elif output_run_id.endswith("_driving"):
+            output_run_id = output_run_id[: -len("_driving")]
 
         return _render_page(
             message="Processing selesai.",
-            output_video_name=output_video_name,
+          output_run_id=output_run_id,
+          output_video_mode="information",
             elapsed_seconds=elapsed,
         )
 

@@ -7,7 +7,7 @@ OUTPUT_DIR = ASSETS_DIR / "output"
 TEMP_FRAMES_DIR = ASSETS_DIR / "temp_frames"
 LOG_DIR = BASE_DIR / "logs"
 
-YOLO_MODEL_PATH = BASE_DIR / "assets" / "models" / "yolo.pt"
+YOLO_MODEL_PATH = BASE_DIR / "assets" / "models" / "yolo_best.pt"
 LANE_MODEL_PATH = BASE_DIR / "assets" / "models" / "lane_twinlitenet_best.pth"
 
 DB_PATH = BASE_DIR / "perception.db"
@@ -31,22 +31,25 @@ RISK_CONFIG = {
 }
 
 RISK_FUSION_CONFIG = {
-	"object_high_threshold": 70.0,
-	"object_medium_threshold": 45.0,
-	"proximity_weight": 0.45,
-	"motion_weight": 0.20,
-	"lane_weight": 0.15,
-	"flow_weight": 0.20,
-	"path_occupancy_weight": 0.25,
-	"hazard_weight": 0.55,
-	"capacity_weight": 0.45,
-	"moving_object_bias": 20.0,
+	"object_high_threshold": 80.0,
+	"object_medium_threshold": 60.0,
+	"proximity_weight": 0.25,
+	"motion_weight": 0.10,
+	"lane_weight": 0.08,
+	"flow_weight": 0.15,
+	"path_occupancy_weight": 0.12,
+	"hazard_weight": 0.40,
+	"capacity_weight": 0.60,
+	"moving_object_bias": 6.0,
 	"flow_normalizer": 6.0,
+	"scene_alert_min_high_risk_objects": 2,
+	"scene_alert_hazard_threshold": 70.0,
+	"scene_alert_occupancy_threshold": 50.0,
 	"class_weights": {
-		0: 1.35,
-		1: 1.20,
+		0: 1.10,
+		1: 1.08,
 		2: 1.00,
-		3: 1.15,
+		3: 1.06,
 		5: 1.05,
 		7: 1.05,
 	},
@@ -108,4 +111,31 @@ LANE_CONFIG = {
 	"input_h": 360,
 	"input_w": 640,
 	"device": "cpu",
+}
+
+GUIDANCE_CONFIG = {
+	"enabled": True,
+	"default_mode": "information",  # "information" or "driving"
+	"show_technical_metrics": True,
+	"show_guidance_metrics": True,
+	# Thresholds for safety mapping
+	"safety_critical_threshold": 20.0,
+	"safety_danger_threshold": 40.0,
+	"safety_caution_threshold": 70.0,
+	# Capacity thresholds (%)
+	"capacity_blocked_threshold": 8.0,
+	"capacity_narrow_threshold": 25.0,
+	"capacity_adequate_threshold": 50.0,
+	# Occupancy thresholds
+	"occupancy_clear_threshold": 25.0,
+	"occupancy_moderate_threshold": 40.0,
+	"occupancy_high_threshold": 60.0,
+	# Traffic density thresholds (detection count)
+	"traffic_empty_threshold": 1,
+	"traffic_normal_threshold": 4,
+	"traffic_heavy_threshold": 7,
+	# System health thresholds (FPS)
+	"system_laggy_threshold": 1.0,
+	"system_adequate_threshold": 3.0,
+	"system_smooth_threshold": 5.0,
 }

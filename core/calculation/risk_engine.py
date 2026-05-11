@@ -212,7 +212,12 @@ class RiskEngine:
         flow_score = self._flow_score(flow_stats)
 
         drivable_ratio = float(lane_result.get("drivable_pixel_ratio", 0.0)) if lane_result else 0.0
-        drivable_capacity_score = self._clamp((drivable_ratio * 100.0) - path_occupancy_risk)
+        drivable_capacity_from_lane = drivable_ratio * 100.0
+        occupancy_free_score = 100.0 - path_occupancy_risk
+        # Keep capacity stable in open scenes where lane/drivable segmentation can be noisy.
+        drivable_capacity_score = self._clamp(
+            0.35 * drivable_capacity_from_lane + 0.65 * occupancy_free_score
+        )
 
         dynamic_hazard_index = self._clamp(
             RISK_FUSION_CONFIG["hazard_weight"] * avg_object_risk
@@ -226,7 +231,15 @@ class RiskEngine:
             + (1.0 - RISK_FUSION_CONFIG["capacity_weight"]) * (100.0 - dynamic_hazard_index)
         )
 
-        alert_flag = 1 if (scene_risk_score > 0 or dynamic_hazard_index >= 60.0 or path_occupancy_risk >= 35.0) else 0
+        min_high_risk_objects = int(RISK_FUSION_CONFIG.get("scene_alert_min_high_risk_objects", 1))
+        hazard_threshold = float(RISK_FUSION_CONFIG.get("scene_alert_hazard_threshold", 60.0))
+        occupancy_threshold = float(RISK_FUSION_CONFIG.get("scene_alert_occupancy_threshold", 35.0))
+
+        alert_flag = 1 if (
+            scene_risk_score >= min_high_risk_objects
+            or dynamic_hazard_index >= hazard_threshold
+            or path_occupancy_risk >= occupancy_threshold
+        ) else 0
 
         return {
             "scene_risk_score": scene_risk_score,

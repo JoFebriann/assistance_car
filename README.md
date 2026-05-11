@@ -19,9 +19,10 @@ Sistem persepsi kendaraan berbasis computer vision yang memproses video dari kam
    - [Core — Depth](#56-core--depth)
    - [Core — Optical Flow](#57-core--optical-flow)
    - [Core — Risk Engine](#58-core--risk-engine)
-   - [Core — Video Output](#59-core--video-output)
-   - [Database](#510-database)
-   - [Utils](#511-utils)
+   - [Core — Guidance Interpretation](#59-core--guidance-interpretation)
+   - [Core — Video Output](#510-core--video-output)
+   - [Database](#511-database)
+   - [Utils](#512-utils)
 6. [Skema Database](#6-skema-database)
 7. [Output Artifacts](#7-output-artifacts)
 8. [Cara Menjalankan](#8-cara-menjalankan)
@@ -45,7 +46,9 @@ Sistem ini dirancang untuk membantu pengemudi kendaraan dengan menganalisis kond
 | **Output Video** | Menghasilkan video anotasi dengan bounding box, jarak, level risiko, status gerak objek (MOV/STA), panah gerak, info scene flow, serta overlay inference time + FPS |
 | **Audio Alert** | Menghasilkan file WAV dengan bunyi beep saat terdeteksi objek berisiko tinggi |
 | **Performance Evaluation** | Mengukur inference time per fitur, total pipeline latency, FPS, latency percentile (P50/P95), dan rata-rata deteksi per frame |
-| **Dashboard** | Menampilkan ringkasan analitik (risk + performance) melalui antarmuka FastAPI Web UI |
+| **Layperson Guidance Interpretation** | Mengkonversi metrik teknis kompleks menjadi rekomendasi human-friendly untuk pengemudi awam (e.g., "⚠️ HATI-HATI - Kurangi kecepatan") |
+| **Dual-Mode Dashboard** | Tampilan Information Mode (semua data teknis) dan Driving Mode (guidance ringkas untuk pengemudi) |
+| **Dashboard** | Menampilkan ringkasan analitik (risk + performance + guidance) melalui antarmuka FastAPI Web UI |
 
 ---
 
@@ -298,17 +301,33 @@ Berikut adalah alur data lengkap dari input hingga output:
 
 Antarmuka utama berbasis web yang dijalankan dengan `uvicorn app:app --reload`.
 
-Halaman web sederhana menyediakan:
-1. Form input source (`bag` atau `mp4`)
-2. Trigger proses pipeline end-to-end
-3. Ringkasan metrik operasional + insight (`Path Occupancy Risk`, `Dynamic Hazard Index`, `Drivable Capacity Score`, `Trip Safety Score`)
-4. Preview video output dan audio alert
+Halaman web menyediakan:
+1. **Mode Display Toggle** — Dua mode tampilan:
+   - **📊 Information Mode**: Menampilkan Guidance Card + Semua metrik teknis (Perception Summary + Performance Evaluation) untuk engineering/expert users
+   - **🚗 Driving Mode**: Menampilkan hanya Guidance Card dengan rekomendasi user-friendly untuk pengemudi awam
+   - Mode preference disimpan di browser `localStorage`
+
+2. Form input source (`bag` atau `mp4`)
+
+3. **Guidance Card** — Interpretasi user-friendly dari kondisi perjalanan:
+   - Emoji status (✅ AMAN / ⚠️ HATI-HATI / 🔴 BERBAHAYA / 🛑 KRITIS)
+   - Main action recommendation
+   - 4-column breakdown: Kondisi Jalan | Lalu Lintas | Pengisian Lajur | Kesehatan Sistem
+   - Actionable recommendations
+
+4. **Technical Metrics** (Information Mode hanya):
+   - Perception Summary: Total Frames, Detections, Risk scores, Lane overlap, Flow, Capacity, Safety
+   - Performance Evaluation: Inference time per stage, Total latency, FPS, P50/P95, Min/Max, Detections per frame
+
+5. Preview video output dan audio alert
 
 Alur di `app.py`:
 1. `init_database()` dipanggil saat startup FastAPI
 2. Saat endpoint `/process` dipanggil → file MP4 disimpan sementara (temporary file) atau path BAG langsung digunakan
 3. `VideoService(YOLO_MODEL_PATH).process(source_path, source_type)` dijalankan
-4. Setelah selesai → `AnalyticsRepository().summary()` dipanggil untuk menampilkan ringkasan
+4. Setelah selesai → `AnalyticsRepository().summary()` dipanggil
+5. Metrics di-pass ke `GuidanceInterpreter.generate_guidance()` untuk menghasilkan guidance human-friendly
+6. Guidance card dan technical metrics ditampilkan sesuai display mode yang dipilih user
 
 #### `run_backend.py` — CLI
 
@@ -335,6 +354,12 @@ Konfigurasi penting sekarang mencakup:
 - `RISK_CONFIG` untuk threshold jarak
 - `RISK_FUSION_CONFIG` untuk bobot fusion object/scene insights
 - `FLOW_CONFIG` dan `OBJECT_FLOW_CONFIG` untuk optical flow global + object-level
+- **`GUIDANCE_CONFIG`** — Configuration untuk Guidance Interpretation System:
+  - `enabled`: Enable/disable guidance feature (default: True)
+  - `default_mode`: Mode tampilan default ("information" atau "driving")
+  - `show_technical_metrics` / `show_guidance_metrics`: Toggle mana yang ditampilkan
+  - Safety thresholds: `safety_critical_threshold` (22.0), `safety_danger_threshold` (42.0), `safety_caution_threshold` (68.0)
+  - Capacity/Occupancy/Traffic/System thresholds untuk interpretasi metrik lainnya
 
 ---
 
@@ -583,7 +608,111 @@ Metrik scene yang dihasilkan:
 
 ---
 
-### 5.9 Core — Video Output
+### 5.9 Core — Guidance Interpretation
+
+#### `core/calculation/guidance_interpreter.py` — `GuidanceInterpreter`
+
+Mengkonversi metrik teknis dari risk engine menjadi guidance yang user-friendly untuk pengemudi awam (non-technical users).
+
+**Purpose:**
+- Mengubah angka-angka seperti `trip_safety_score = 42.3` menjadi "🔴 BERBAHAYA - Sangat kurangi kecepatan, perhatian penuh"
+- Menyediakan interpretasi yang mudah dipahami tanpa perlu memahami technical details
+- Mendukung dual-mode display di dashboard (Information Mode untuk expert, Driving Mode untuk pengemudi umum)
+
+**Main Methods:**
+
+1. **`generate_guidance(metrics: dict) → dict`** — Entry point utama
+   - Input: metrics dict dari `AnalyticsRepository.summary()`
+   - Output: comprehensive guidance dict dengan status, action, breakdown, recommendations
+   
+2. **Interpretation Mappers** (Static methods):
+   - `interpret_safety(trip_safety_score)` → `SafetyStatus` enum
+    - `< 22`: 🛑 CRITICAL (STOP - Sangat berbahaya)
+    - `22-42`: 🔴 DANGER (Berbahaya, sangat kurangi kecepatan)
+    - `42-68`: ⚠️ CAUTION (Hati-hati, kurangi kecepatan)
+    - `≥ 68`: ✅ SAFE (Aman, lanjutkan normal)
+   
+   - `interpret_capacity(drivable_capacity_score)` → `CapacityStatus` enum
+     - Mendeskripsikan kondisi area drivable di jalan
+   
+   - `interpret_traffic(avg_detection_per_frame)` → `TrafficDensity` enum
+     - Mendeskripsikan keramaian lalu lintas
+   
+   - `interpret_system_health(avg_pipeline_fps)` → `SystemHealth` enum
+     - Mendeskripsikan responsivitas sistem
+   
+   - `interpret_occupancy(path_occupancy_risk)` → `str`
+     - Detail level pengisian lajur dengan objek
+
+3. **`generate_short_guidance_overlay(metrics)` → `str`**
+   - Menghasilkan teks singkat untuk overlay video (e.g., "⚠️ HATI-HATI\nKurangi kecepatan")
+   - Cocok untuk menampilkan di frame video atau realtime stream
+
+**Thresholds & Logic:**
+
+| Metrik | Threshold | Interpretasi |
+|---|---|---|
+| trip_safety_score | < 22 | 🛑 CRITICAL |
+| | 22-42 | 🔴 DANGER |
+| | 42-68 | ⚠️ CAUTION |
+| | ≥ 68 | ✅ SAFE |
+| drivable_capacity_score | < 25% | BLOCKED (Jalan tertutup) |
+| | 25-50% | NARROW (Jalan sempit) |
+| | 50-75% | ADEQUATE (Cukup) |
+| | ≥ 75% | OPEN (Luas) |
+| path_occupancy_risk | < 25 | Clear |
+| | 25-40 | Moderate |
+| | 40-60 | High |
+| | > 60 | Critical |
+| avg_detection_per_frame | ≤ 1 | EMPTY |
+| | 2-4 | NORMAL |
+| | 5-7 | HEAVY |
+| | > 7 | CONGESTED |
+| avg_pipeline_fps | < 1 | CRITICAL (Sistem sangat lambat) |
+| | 1-3 | LAGGY (Sistem tertinggal) |
+| | 3-5 | ADEQUATE (Agak lambat) |
+| | ≥ 5 | SMOOTH (Responsif baik) |
+
+**Integration with Dashboard:**
+
+Guidance automatically displayed di `app.py`:
+- **Guidance Card** ditampilkan di dashboard dengan emoji status, action text, dan 4-column breakdown
+- **Mode Toggle**: User dapat switch antara "Information Mode" (semua data teknis) dan "Driving Mode" (guidance + rekomendasi saja)
+- Preference disimpan di browser `localStorage`
+
+**Example Output:**
+
+```json
+{
+  "overall_status": "CAUTION",
+  "overall_status_emoji": "⚠️",
+  "overall_status_color": "#f59e0b",
+  "main_action": "Kurangi kecepatan, waspada terhadap hambatan",
+  "jalan_condition": "Area drivable berkurang, ada hambatan",
+  "occupancy_detail": "Lajur mulai penuh (43.2% terisi), kurangi kecepatan",
+  "traffic_condition": "HEAVY",
+  "traffic_condition_text": "Lalu lintas ramai, jaga jarak aman",
+  "system_health": "ADEQUATE",
+  "system_health_text": "Sistem agak lambat, perhatian lebih",
+  "system_fps": "4.23 FPS",
+  "recommendations": [
+    "⚠️ Kurangi kecepatan sedikit, waspada",
+    "📍 Ruang gerak terbatas, hati-hati dengan hambatan",
+    "🚛 Lalu lintas ramai, jaga jarak aman"
+  ],
+  "detailed_breakdown": {
+    "trip_safety_score": "62.4",
+    "drivable_capacity_score": "56.8%",
+    "path_occupancy_risk": "43.2",
+    "avg_detection_per_frame": "5.2",
+    "avg_pipeline_fps": "4.23"
+  }
+}
+```
+
+---
+
+### 5.10 Core — Video Output
 
 #### `core/video/frame_saver.py` — `FrameSaver`
 
@@ -622,7 +751,7 @@ Menghasilkan file audio WAV dengan sinyal peringatan.
 
 ---
 
-### 5.10 Database
+### 5.11 Database
 
 #### `database/db.py`
 
@@ -668,7 +797,7 @@ Enam kelas repository mengikuti pola **Repository Pattern** untuk memisahkan log
 
 ---
 
-### 5.11 Utils
+### 5.12 Utils
 
 #### `utils/frame_models.py` — `FrameData`
 
@@ -820,7 +949,8 @@ Setiap kali memproses file, sistem menghasilkan beberapa output:
 
 | Artifact | Path | Keterangan |
 |---|---|---|
-| **Video anotasi** | `assets/output/{run_id}.mp4` | Video dengan bounding box, jarak, risk level |
+| **Information video** | `assets/output/{run_id}_information.mp4` | Video anotasi teknis lengkap (risk, flow, lane, inferensi, FPS) |
+| **Driving video** | `assets/output/{run_id}_driving.mp4` | Video anotasi ringkas berbasis guidance untuk user awam |
 | **Audio alert** | `assets/output/{run_id}_alert.wav` | File WAV dengan beep saat HIGH risk |
 | **Frame sementara** | `assets/temp_frames/{run_id}/frame_XXXXXX.png` | Dibuat ulang tiap run |
 | **Database** | `perception.db` | Data lengkap semua analisis (di-reset tiap run) |
@@ -854,7 +984,13 @@ Buka browser di `http://127.0.0.1:8000`, lalu:
 2. Upload file `.mp4` atau masukkan path absolut file `.bag`
 3. Klik **Process**
 4. Tunggu proses selesai
-5. Lihat **Perception Summary**, preview video output, dan audio alert
+5. Pilih **Mode Tampilan Dashboard**:
+  - **Information Mode**: guidance + metrik teknis lengkap
+  - **Driving Mode**: guidance ringkas untuk pengemudi awam
+6. Pada panel output video, pilih **Mode Video Hasil**:
+  - **Information Video**: tampilan detail teknis
+  - **Driving Video**: tampilan sederhana dengan kata informatif (misalnya BERHENTI, HATI-HATI, lalu lintas ramai)
+7. Pada panel realtime RealSense, pilih **Mode Realtime Overlay** (`information` / `driving`) sebelum memulai stream
 
 ### Opsi 2: CLI (Backend Only)
 

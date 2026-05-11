@@ -19,7 +19,7 @@ class RealSenseRealtimeService:
         self.logger = get_logger("RealSenseRealtimeService")
         self.pipeline = PerceptionPipeline(model_path)
 
-    def stream(self) -> Iterator[bytes]:
+    def stream(self, annotation_mode: str = "information") -> Iterator[bytes]:
         try:
             import cv2  # type: ignore
             import pyrealsense2 as rs_module  # type: ignore
@@ -99,8 +99,10 @@ class RealSenseRealtimeService:
                     calculations=result["detections"],
                     flow_stats=result["flow"],
                     scene_risk=result["scene_risk"],
+                    scene_metrics=result.get("scene_metrics"),
                     lane_result=result.get("lane"),
                     perf_stats=result.get("performance"),
+                    annotation_mode=annotation_mode,
                 )
 
                 ok, encoded = cv2.imencode(

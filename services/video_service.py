@@ -34,8 +34,9 @@ class VideoService:
         run_id = Path(source_path).stem
         self.logger.info(f"Run ID: {run_id}")
 
-        # 1️⃣ Setup FrameSaver
-        frame_saver = FrameSaver(run_id)
+        # 1️⃣ Setup FrameSaver for both output modes
+        frame_saver_info = FrameSaver(f"{run_id}_information")
+        frame_saver_driving = FrameSaver(f"{run_id}_driving")
 
         # 2️⃣ Select generator (keep instance reference to read fps after processing)
         if source_type == "bag":
@@ -55,10 +56,32 @@ class VideoService:
         # 3️⃣ Process frames
         for frame_data in generator:
             try:
-                result = self.pipeline.process_frame(
-                    frame_data,
-                    frame_saver=frame_saver
+                # Process once for analytics/database; render two visual modes from same results.
+                result = self.pipeline.process_frame(frame_data)
+
+                annotated_info = self.pipeline._draw_annotations(
+                    rgb_image=frame_data.rgb_image,
+                    calculations=result["detections"],
+                    flow_stats=result["flow"],
+                    scene_risk=result["scene_risk"],
+                    scene_metrics=result.get("scene_metrics"),
+                    lane_result=result.get("lane"),
+                    perf_stats=result.get("performance"),
+                    annotation_mode="information",
                 )
+                frame_saver_info.save(frame_data.frame_id, annotated_info)
+
+                annotated_driving = self.pipeline._draw_annotations(
+                    rgb_image=frame_data.rgb_image,
+                    calculations=result["detections"],
+                    flow_stats=result["flow"],
+                    scene_risk=result["scene_risk"],
+                    scene_metrics=result.get("scene_metrics"),
+                    lane_result=result.get("lane"),
+                    perf_stats=result.get("performance"),
+                    annotation_mode="driving",
+                )
+                frame_saver_driving.save(frame_data.frame_id, annotated_driving)
 
                 alert_flags.append(result["alert"])
                 frame_count += 1
@@ -88,18 +111,26 @@ class VideoService:
         # 4️⃣ Build video from saved frames
         video_builder = VideoBuilder()
 
-        silent_video_path = self.output_dir / f"{run_id}_silent.mp4"
-        output_video_path = self.output_dir / f"{run_id}.mp4"
+        silent_video_info = self.output_dir / f"{run_id}_information_silent.mp4"
+        output_video_info = self.output_dir / f"{run_id}_information.mp4"
+        silent_video_driving = self.output_dir / f"{run_id}_driving_silent.mp4"
+        output_video_driving = self.output_dir / f"{run_id}_driving.mp4"
 
         self.logger.info("Building final video from frames...")
 
         video_builder.build(
-            frame_saver.get_frame_dir(),
-            silent_video_path,
+            frame_saver_info.get_frame_dir(),
+            silent_video_info,
+            fps=fps
+        )
+        video_builder.build(
+            frame_saver_driving.get_frame_dir(),
+            silent_video_driving,
             fps=fps
         )
 
-        self.logger.info(f"Silent video saved at: {silent_video_path}")
+        self.logger.info(f"Silent information video saved at: {silent_video_info}")
+        self.logger.info(f"Silent driving video saved at: {silent_video_driving}")
 
         # 5️⃣ Generate alert audio (must use the same FPS as the video)
         wav_path = self.output_dir / f"{run_id}_alert.wav"
@@ -115,17 +146,31 @@ class VideoService:
         self.logger.info(f"Alert audio saved at: {wav_path}")
 
         # 6️⃣ Merge alert audio into video
-        final_video_path = video_builder.attach_audio(
-            video_path=silent_video_path,
+        final_info_video = video_builder.attach_audio(
+            video_path=silent_video_info,
             audio_path=wav_path,
-            output_path=output_video_path
+            output_path=output_video_info
+        )
+        final_driving_video = video_builder.attach_audio(
+            video_path=silent_video_driving,
+            audio_path=wav_path,
+            output_path=output_video_driving
         )
 
-        if not VIDEO_CONFIG["keep_intermediate_silent_video"] and silent_video_path.exists():
-            silent_video_path.unlink()
+        if not VIDEO_CONFIG["keep_intermediate_silent_video"]:
+            if silent_video_info.exists():
+                silent_video_info.unlink()
+            if silent_video_driving.exists():
+                silent_video_driving.unlink()
 
-        self.logger.info(f"Final video saved at: {final_video_path}")
+        self.logger.info(f"Final information video saved at: {final_info_video}")
+        self.logger.info(f"Final driving video saved at: {final_driving_video}")
 
         self.logger.info("==== FINISHED ====")
 
-        return final_video_path
+        return {
+            "run_id": run_id,
+            "information_video": str(final_info_video),
+            "driving_video": str(final_driving_video),
+            "audio_alert": str(wav_path),
+        }
