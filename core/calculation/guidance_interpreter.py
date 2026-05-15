@@ -177,18 +177,14 @@ class GuidanceInterpreter:
         detection_count = float(metrics.get("avg_detection_per_frame", 0.0) or 0.0)
         fps = float(metrics.get("avg_pipeline_fps", 0.0) or 0.0)
 
-        # Use occupancy-aware capacity so "lajur kosong" is not reported as "jalan tertutup".
-        effective_capacity = cls._clamp(max(drivable_cap, 100.0 - path_occ))
-        
         safety_status = cls.interpret_safety(trip_safety)
-        capacity_status = cls.interpret_capacity(effective_capacity)
+        capacity_status = cls.interpret_capacity(drivable_cap)
         traffic_status = cls.interpret_traffic(detection_count)
         system_status = cls.interpret_system_health(fps)
 
         # Generate recommendations
         recommendations = cls._generate_recommendations(
-            safety_status, capacity_status, traffic_status, system_status,
-            path_occ, trip_safety
+            safety_status, capacity_status, traffic_status, system_status
         )
 
         return {
@@ -207,7 +203,6 @@ class GuidanceInterpreter:
             "detailed_breakdown": {
                 "trip_safety_score": f"{trip_safety:.1f}",
                 "drivable_capacity_score": f"{drivable_cap:.1f}%",
-                "effective_capacity_score": f"{effective_capacity:.1f}%",
                 "path_occupancy_risk": f"{path_occ:.1f}",
                 "avg_detection_per_frame": f"{detection_count:.2f}",
                 "avg_pipeline_fps": f"{fps:.2f}",
@@ -221,8 +216,6 @@ class GuidanceInterpreter:
         capacity_status: CapacityStatus,
         traffic_status: TrafficDensity,
         system_status: SystemHealth,
-        path_occ: float,
-        trip_safety: float,
     ) -> list[str]:
         """Generate actionable recommendations based on all factors."""
         recs = []

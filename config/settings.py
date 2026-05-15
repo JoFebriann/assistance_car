@@ -35,28 +35,13 @@ RISK_CONFIG = {
 }
 
 RISK_FUSION_CONFIG = {
-	"object_high_threshold": 80.0,
-	"object_medium_threshold": 60.0,
-	"proximity_weight": 0.25,
-	"motion_weight": 0.10,
-	"lane_weight": 0.08,
-	"flow_weight": 0.15,
-	"path_occupancy_weight": 0.12,
-	"hazard_weight": 0.40,
-	"capacity_weight": 0.60,
-	"moving_object_bias": 6.0,
-	"flow_normalizer": 6.0,
-	"scene_alert_min_high_risk_objects": 2,
-	"scene_alert_hazard_threshold": 70.0,
-	"scene_alert_occupancy_threshold": 50.0,
-	"class_weights": {
-		0: 1.10,
-		1: 1.08,
-		2: 1.00,
-		3: 1.06,
-		5: 1.05,
-		7: 1.05,
-	},
+	"object_high_threshold": 75.0, # Mungkin perlu dicari dasar kenapa 75m ini bisa dibilang high object risk gitu?
+	"object_medium_threshold": 50.0,
+	"proximity_weight": 0.45,
+	"motion_weight": 0.30,
+	"lane_weight": 0.25,
+	"scene_alert_hazard_threshold": 60.0,
+	"scene_alert_occupancy_threshold": 35.0,
 }
 
 FLOW_CONFIG = {

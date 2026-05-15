@@ -38,11 +38,14 @@ class RiskEngine:
 
     @staticmethod
     def _proximity_score(distance_m: float) -> float:
-        if distance_m <= RISK_CONFIG["high_distance_m"]:
+        high_distance = float(RISK_CONFIG.get("high_distance_m", 5.0))
+        medium_distance = float(RISK_CONFIG.get("medium_distance_m", 10.0))
+
+        if distance_m <= high_distance:
             return 100.0
-        if distance_m <= RISK_CONFIG["medium_distance_m"]:
+        if distance_m <= medium_distance:
             return 60.0
-        return max(0.0, 60.0 - (distance_m - RISK_CONFIG["medium_distance_m"]) * 4.0)
+        return max(0.0, 60.0 - (distance_m - medium_distance) * 4.0)
 
     @staticmethod
     def _motion_score(object_flow: Optional[Dict]) -> float:
@@ -50,26 +53,15 @@ class RiskEngine:
             return 0.0
 
         magnitude = float(object_flow.get("object_magnitude", 0.0) or 0.0)
-        threshold = float(OBJECT_FLOW_CONFIG["moving_threshold"])
+        threshold = float(OBJECT_FLOW_CONFIG.get("moving_threshold", 1.5))
         if threshold <= 0:
             return 0.0
 
-        raw_score = (magnitude / threshold) * 60.0
+        raw_score = (magnitude / threshold) * 100.0
         if not object_flow.get("is_moving"):
-            raw_score *= 0.35
+            raw_score *= 0.5
 
         return RiskEngine._clamp(raw_score)
-
-    @staticmethod
-    def _class_weight(class_id: Optional[int]) -> float:
-        if class_id is None:
-            return 1.0
-
-        class_weights = RISK_FUSION_CONFIG.get("class_weights", {})
-        try:
-            return float(class_weights.get(int(class_id), 1.0))
-        except Exception:
-            return 1.0
 
     @staticmethod
     def _flow_score(flow_stats: Optional[Dict[str, float]]) -> float:
@@ -77,11 +69,7 @@ class RiskEngine:
             return 0.0
 
         mean_magnitude = float(flow_stats.get("mean_magnitude", 0.0) or 0.0)
-        normalizer = float(RISK_FUSION_CONFIG.get("flow_normalizer", 6.0))
-        if normalizer <= 0:
-            return 0.0
-
-        return RiskEngine._clamp((mean_magnitude / normalizer) * 100.0)
+        return RiskEngine._clamp(mean_magnitude * 12.0)
 
     def assess_object_risk(
         self,
@@ -91,21 +79,18 @@ class RiskEngine:
         bbox: Optional[Any] = None,
         class_id: Optional[int] = None,
     ) -> Dict[str, Any]:
+        del class_id  # class weighting removed to keep the model straightforward
+
         lane_overlap_ratio = self._lane_overlap_ratio(bbox, lane_result) if bbox is not None else 0.0
         lane_score = lane_overlap_ratio * 100.0
-        class_weight = self._class_weight(class_id)
 
         if distance_m is None:
             motion_score = self._motion_score(object_flow)
-            contextual_score = (
-                0.60 * motion_score
-                + 0.40 * lane_score
-            ) * class_weight
-            risk_score = self._clamp(contextual_score)
+            risk_score = self._clamp(0.55 * motion_score + 0.45 * lane_score)
 
-            if risk_score >= RISK_FUSION_CONFIG["object_high_threshold"]:
+            if risk_score >= RISK_FUSION_CONFIG.get("object_high_threshold", 75.0):
                 risk = "HIGH"
-            elif risk_score >= RISK_FUSION_CONFIG["object_medium_threshold"]:
+            elif risk_score >= RISK_FUSION_CONFIG.get("object_medium_threshold", 50.0):
                 risk = "MEDIUM"
             elif motion_score > 0.0 or lane_overlap_ratio > 0.0:
                 risk = "LOW"
@@ -119,28 +104,20 @@ class RiskEngine:
                 "motion_score": motion_score,
                 "lane_overlap_ratio": lane_overlap_ratio,
                 "path_occupancy_risk": self._clamp(risk_score * lane_overlap_ratio),
-                "class_weight": class_weight,
             }
 
         proximity_score = self._proximity_score(distance_m)
         motion_score = self._motion_score(object_flow)
 
-        base_score = (
-            RISK_FUSION_CONFIG["proximity_weight"] * proximity_score
-            + RISK_FUSION_CONFIG["motion_weight"] * motion_score
-            + RISK_FUSION_CONFIG["lane_weight"] * lane_score
+        risk_score = self._clamp(
+            0.45 * proximity_score
+            + 0.30 * motion_score
+            + 0.25 * lane_score
         )
 
-        risk_score = self._clamp(base_score * class_weight)
-
-        if object_flow and object_flow.get("is_moving"):
-            risk_score = self._clamp(
-                risk_score + (lane_overlap_ratio * RISK_FUSION_CONFIG["moving_object_bias"])
-            )
-
-        if risk_score >= RISK_FUSION_CONFIG["object_high_threshold"]:
+        if risk_score >= RISK_FUSION_CONFIG.get("object_high_threshold", 75.0):
             risk = "HIGH"
-        elif risk_score >= RISK_FUSION_CONFIG["object_medium_threshold"]:
+        elif risk_score >= RISK_FUSION_CONFIG.get("object_medium_threshold", 50.0):
             risk = "MEDIUM"
         else:
             risk = "LOW"
@@ -154,7 +131,6 @@ class RiskEngine:
             "motion_score": motion_score,
             "lane_overlap_ratio": lane_overlap_ratio,
             "path_occupancy_risk": path_occupancy_risk,
-            "class_weight": class_weight,
         }
 
     def estimate_risk(
@@ -208,35 +184,33 @@ class RiskEngine:
 
         avg_object_risk = float(np.mean(object_risk_scores)) if object_risk_scores else 0.0
         moving_objects = sum(1 for c in object_calcs if c.get("object_flow") and c["object_flow"].get("is_moving"))
-        moving_pressure = min(100.0, moving_objects * RISK_FUSION_CONFIG["moving_object_bias"])
+        moving_pressure = min(100.0, moving_objects * 10.0)
         flow_score = self._flow_score(flow_stats)
 
         drivable_ratio = float(lane_result.get("drivable_pixel_ratio", 0.0)) if lane_result else 0.0
         drivable_capacity_from_lane = drivable_ratio * 100.0
         occupancy_free_score = 100.0 - path_occupancy_risk
-        # Keep capacity stable in open scenes where lane/drivable segmentation can be noisy.
         drivable_capacity_score = self._clamp(
-            0.35 * drivable_capacity_from_lane + 0.65 * occupancy_free_score
+            0.50 * drivable_capacity_from_lane + 0.50 * occupancy_free_score
         )
 
         dynamic_hazard_index = self._clamp(
-            RISK_FUSION_CONFIG["hazard_weight"] * avg_object_risk
-            + RISK_FUSION_CONFIG["path_occupancy_weight"] * path_occupancy_risk
-            + RISK_FUSION_CONFIG["flow_weight"] * flow_score
-            + 0.10 * moving_pressure
+            0.65 * avg_object_risk
+            + 0.25 * path_occupancy_risk
+            + 0.10 * flow_score
+            + 0.05 * moving_pressure
         )
 
         trip_safety_score = self._clamp(
-            RISK_FUSION_CONFIG["capacity_weight"] * drivable_capacity_score
-            + (1.0 - RISK_FUSION_CONFIG["capacity_weight"]) * (100.0 - dynamic_hazard_index)
+            0.60 * drivable_capacity_score
+            + 0.40 * (100.0 - dynamic_hazard_index)
         )
 
-        min_high_risk_objects = int(RISK_FUSION_CONFIG.get("scene_alert_min_high_risk_objects", 1))
         hazard_threshold = float(RISK_FUSION_CONFIG.get("scene_alert_hazard_threshold", 60.0))
         occupancy_threshold = float(RISK_FUSION_CONFIG.get("scene_alert_occupancy_threshold", 35.0))
 
         alert_flag = 1 if (
-            scene_risk_score >= min_high_risk_objects
+            scene_risk_score > 0
             or dynamic_hazard_index >= hazard_threshold
             or path_occupancy_risk >= occupancy_threshold
         ) else 0

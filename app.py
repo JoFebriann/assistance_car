@@ -653,7 +653,6 @@ def _render_page(
         <div class='metric'><strong>Lane Segmentation</strong><br>{avg_lane_ms:.2f} ms</div>
         <div class='metric'><strong>Risk Fusion</strong><br>{avg_risk_ms:.2f} ms</div>
         <div class='metric'><strong>Scene Metrics</strong><br>{avg_scene_ms:.2f} ms</div>
-        <div class='metric'><strong>Annotation Render</strong><br>{avg_annotation_ms:.2f} ms</div>
       </div>
     </div>
 

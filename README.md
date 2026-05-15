@@ -146,188 +146,6 @@ Sistem ini dirancang untuk membantu pengemudi kendaraan dengan menganalisis kond
 
 ---
 
-## 3. Struktur Direktori
-
-```
-assistance_car/
-│
-├── app.py                          # Entry point: Streamlit UI
-├── run_backend.py                  # Entry point: CLI (non-GUI)
-│
-├── config/
-│   └── settings.py                 # Konfigurasi path model YOLO
-│
-├── core/                           # Business logic utama
-│   ├── pipeline.py                 # PerceptionPipeline (orkestrasi per-frame)
-│   ├── frame_processor.py          # (Placeholder, belum diimplementasi)
-│   │
-│   ├── detection/
-│   │   ├── base_detector.py        # Abstract base class detector
-│   │   └── yolo_detector.py        # YOLO v11 via ultralytics
-│   │
-│   ├── depth/
-│   │   └── stereo_depth.py         # StereoDepth: median distance dari depth map
-│   │
-│   ├── lane/                       # Lane segmentation (TwinLiteNetPlus)
-│   │   ├── lane_detector.py        # Wrapper inferensi lane/drivable
-│   │   └── twinlitenet_model.py    # Arsitektur model TwinLiteNetPlus
-│   │
-│   ├── optical_flow/
-│   │   ├── global_flow.py          # Dense flow global (scene level)
-│   │   └── object_flow.py          # Statistik flow per objek (ROI bbox)
-│   │
-│   ├── calculation/
-│   │   └── risk_engine.py          # RiskEngine: per-object & scene risk
-│   │
-│   └── video/
-│       ├── frame_saver.py          # Simpan frame anotasi sebagai PNG
-│       ├── video_builder.py        # Rakit PNG menjadi file MP4
-│       └── audio_alert.py          # Generate WAV alert (beep saat HIGH risk)
-│
-├── database/
-│   ├── db.py                       # Koneksi SQLite, init & reset database
-│   ├── schema.sql                  # DDL: tabel analytics + performance
-│   └── repository.py               # Repository pattern: 6 kelas repository
-│
-├── services/
-│   ├── video_service.py            # VideoService: orkestrasi level run
-│   ├── bag_generator.py            # BagFrameGenerator (pyrealsense2)
-│   └── video_generator.py          # VideoFrameGenerator (OpenCV)
-│
-├── utils/
-│   ├── frame_models.py             # FrameData dataclass
-│   └── logger.py                   # Logger ke file + console
-│
-├── assets/
-│   ├── models/
-│   │   └── yolo.pt                 # Model YOLO yang digunakan
-│   ├── temp_frames/                # Frame sementara selama proses (per run_id)
-│   ├── output/                     # Output video (.mp4) dan audio (.wav)
-│   └── audio/                      # (Reserved)
-│
-├── logs/
-│   └── system.log                  # Log semua aktivitas sistem
-│
-└── perception.db                   # Database SQLite hasil analisis
-```
-
----
-
-## 4. Alur Data (Data Flow)
-
-Berikut adalah alur data lengkap dari input hingga output:
-
-```
-┌─────────────────────┐
-│  INPUT              │
-│  .bag atau .mp4     │
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────────────────────────────┐
-│  GENERATOR (per frame)                      │
-│                                             │
-│  .bag → BagFrameGenerator                  │
-│          - Buka file via pyrealsense2        │
-│          - Ekstrak: color frame (RGB)        │
-│                     depth frame             │
-│                     camera intrinsics       │
-│                     timestamp               │
-│                                             │
-│  .mp4 → VideoFrameGenerator                │
-│          - Baca frame via OpenCV            │
-│          - BGR → RGB                        │
-│          - depth_map = zeros (tidak ada)    │
-│          - camera_matrix = identity         │
-│                                             │
-│  Yield: FrameData (tiap frame)              │
-└──────────┬──────────────────────────────────┘
-           │ FrameData
-           ▼
-┌─────────────────────────────────────────────┐
-│  PerceptionPipeline.process_frame()         │
-│                                             │
-│  Langkah 1: Simpan info frame               │
-│    → FrameRepository.insert()              │
-│      → INSERT INTO frames                  │
-│                                             │
-│  Langkah 2: Object Detection                │
-│    → YOLODetector.detect(rgb_image)         │
-│      Output: [{bbox, confidence, class_id}] │
-│                                             │
-│  Langkah 3: Optical Flow                    │
-│    → GlobalOpticalFlow.compute(rgb_image)   │
-│      Metode: Farnebäck dense flow          │
-│      Output: (flow_stats, flow_field)       │
-│    → OpticalFlowRepository.insert()        │
-│      → INSERT INTO optical_flow            │
-│                                             │
-│  Langkah 4: Object Optical Flow             │
-│    → ObjectOpticalFlow.compute_object_flows(│
-│        flow_field, detections)              │
-│      Output per objek:                      │
-│      {object_magnitude, object_dx,          │
-│       object_dy, is_moving}                 │
-│                                             │
-│  Langkah 5: Depth + Risk per Object         │
-│    → StereoDepth.compute_distance(...)       │
-│    → RiskEngine.assess_object_risk(          │
-│        distance_m, object_flow, lane_result, │
-│        bbox, class_id)                      │
-│      Output: risk + risk_score +             │
-│      lane_overlap + occupancy contribution   │
-│    → DetectionRepository.insert()           │
-│      → INSERT INTO detections               │
-│        (+ risk_score, lane_overlap, object_flow) │
-│                                             │
-│  Langkah 6: Scene Fusion Metrics            │
-│    → RiskEngine.compute_scene_metrics()     │
-│      Output: scene_risk_score,              │
-│      path_occupancy_risk, dynamic_hazard,   │
-│      drivable_capacity, trip_safety, alert  │
-│    → SceneRepository.insert(frame_id, metrics) │
-│      → INSERT INTO scene_metrics            │
-│                                             │
-│  Langkah 7: Simpan Frame Anotasi            │
-│    → _draw_annotations() → BGR image        │
-│      Anotasi: bounding box berwarna,        │
-│               label class + jarak + risk,   │
-│               MOV/STA + panah gerak objek,  │
-│               info scene flow + scene risk, │
-│               inference ms + FPS            │
-│    → FrameSaver.save() → PNG               │
-│      Path: assets/temp_frames/{run_id}/     │
-│                                             │
-│  Langkah 8: Simpan Performance Metrics       │
-│    → INSERT INTO performance_metrics         │
-│      (per-model ms, total ms, fps, p95-ready)|
-└──────────┬──────────────────────────────────┘
-           │ (setelah semua frame selesai)
-           ▼
-┌─────────────────────────────────────────────┐
-│  POST-PROCESSING                            │
-│                                             │
-│  VideoBuilder.build()                       │
-│    - Gabung semua PNG → MP4                 │
-│    - FPS: 20                                │
-│    - Output: assets/output/{run_id}.mp4     │
-│                                             │
-│  generate_alert_wav()                       │
-│    - 1 sampel audio per frame               │
-│    - Beep 1200Hz (3 pulsa/detik) jika alert │
-│    - Output: assets/output/{run_id}_alert.wav│
-└──────────┬──────────────────────────────────┘
-           │
-           ▼
-┌─────────────────────────────────────────────┐
-│  HASIL TERSIMPAN DI perception.db           │
-│  + Video & Audio di assets/output/          │
-│  + Log di logs/system.log                   │
-└─────────────────────────────────────────────┘
-```
-
----
-
 ## 5. Penjelasan Komponen
 
 ### 5.1 Entry Points
@@ -388,7 +206,7 @@ Konfigurasi penting sekarang mencakup:
 
 - `YOLO_MODEL_PATH` dan `LANE_MODEL_PATH`
 - `RISK_CONFIG` untuk threshold jarak
-- `RISK_FUSION_CONFIG` untuk bobot fusion object/scene insights
+- `RISK_FUSION_CONFIG` untuk penggabungan inti: bobot proximity, motion, lane, serta ambang alert scene
 - `FLOW_CONFIG` dan `OBJECT_FLOW_CONFIG` untuk optical flow global + object-level
 - **`GUIDANCE_CONFIG`** — Configuration untuk Guidance Interpretation System:
   - `enabled`: Enable/disable guidance feature (default: True)
@@ -878,53 +696,113 @@ Threshold gerak default di konfigurasi:
 
 #### `core/calculation/risk_engine.py` — `RiskEngine`
 
-Risk engine kini memakai **fusion scoring**, bukan sekadar downgrade rule.
+Risk Engine sekarang dibuat lebih sederhana. Tujuannya bukan mencari "angka paling banyak", tapi memberi jawaban yang cukup jelas untuk 3 hal utama:
 
-**`assess_object_risk(distance_m, object_flow, lane_result, bbox, class_id)` — Risk per objek:**
+1. Apakah objek ini dekat?
+2. Apakah objek ini bergerak?
+3. Apakah objek ini menutupi jalur drivable?
 
-Komponen per objek yang digabung:
+Kalau tiga pertanyaan itu dijawab, sistem bisa membuat skor risiko objek dan skor risiko scene.
 
-- `proximity_score` (dari distance)
-- `motion_score` (dari object flow magnitude + moving state)
-- `lane_overlap_ratio` (overlap bbox terhadap drivable area)
-- `class_weight` (bobot kelas objek)
+#### Parameter inti yang dipakai
 
-Output object-context:
+Saat ini [RISK_FUSION_CONFIG](config/settings.py) hanya menyimpan parameter inti berikut:
 
-```python
-{
-  "risk": "HIGH|MEDIUM|LOW|UNKNOWN",
-  "risk_score": float,
-  "proximity_score": float,
-  "motion_score": float,
-  "lane_overlap_ratio": float,
-  "path_occupancy_risk": float,
-  "class_weight": float
-}
+- `object_high_threshold`
+- `object_medium_threshold`
+- `proximity_weight`
+- `motion_weight`
+- `lane_weight`
+- `scene_alert_hazard_threshold`
+- `scene_alert_occupancy_threshold`
+
+Artinya:
+
+- `object_high_threshold` dan `object_medium_threshold` dipakai untuk membagi objek menjadi `HIGH`, `MEDIUM`, atau `LOW`.
+- `proximity_weight`, `motion_weight`, dan `lane_weight` dipakai untuk membentuk skor objek.
+- `scene_alert_hazard_threshold` dan `scene_alert_occupancy_threshold` dipakai untuk menentukan apakah scene perlu alert.
+
+#### Alur hitung risiko objek
+
+Fungsi utama yang dipakai adalah `assess_object_risk(distance_m, object_flow, lane_result, bbox, class_id)`.
+
+Cara kerjanya:
+
+1. **Hitung overlap dengan jalur drivable**
+
+   - Sistem mengambil `bbox` objek dan `da_mask` dari lane detector.
+   - Hasilnya adalah `lane_overlap_ratio`.
+   - Semakin besar overlap, semakin besar kemungkinan objek mengganggu jalur.
+2. **Hitung skor jarak**
+
+   - Input: `distance_m`.
+   - Kalau objek sangat dekat, skornya tinggi.
+   - Kalau objek lebih jauh, skornya turun.
+3. **Hitung skor gerakan**
+
+   - Input: `object_flow`.
+   - Sistem membaca `object_magnitude` dan `is_moving`.
+   - Objek yang bergerak lebih dianggap berisiko daripada objek diam.
+4. **Gabungkan tiga sinyal inti**
+
+   - Jarak diberi bobot 45%.
+   - Gerakan diberi bobot 30%.
+   - Okupansi jalur diberi bobot 25%.
+   - Hasil gabungannya adalah `risk_score`.
+5. **Ubah skor menjadi label risiko**
+
+   - Jika `risk_score` besar sekali, labelnya `HIGH`.
+   - Jika sedang, labelnya `MEDIUM`.
+   - Jika kecil, labelnya `LOW`.
+   - Kalau jarak tidak tersedia, sistem bisa memberi `UNKNOWN`.
+6. **Hitung tambahan occupancy risk**
+
+   - Sistem membuat `path_occupancy_risk` dari `risk_score * lane_overlap_ratio`.
+   - Nilai ini dipakai sebagai sinyal tambahan untuk scene.
+
+#### Alur hitung risiko scene
+
+Setelah semua objek dihitung, `compute_scene_metrics()` membuat ringkasan scene:
+
+- `scene_risk_score`
+  - jumlah objek yang berlabel `HIGH`
+- `path_occupancy_risk`
+  - total occupancy risk dari semua objek
+- `drivable_capacity_score`
+  - gabungan kapasitas dari lane mask dan ruang jalan yang masih kosong
+- `dynamic_hazard_index`
+  - ringkasan bahaya scene dari risiko objek, occupancy, flow, dan objek yang bergerak
+- `trip_safety_score`
+  - skor keselamatan utama scene
+- `alert_flag`
+  - tanda apakah scene harus dianggap perlu perhatian
+
+#### Diagram alur Risk Engine
+
+```mermaid
+flowchart TD
+    A[Input per frame] --> B[YOLO detection]
+    A --> C[Lane detector / da_mask]
+    A --> D[Global optical flow]
+    B --> E[distance_m per objek]
+    B --> F[object_flow per objek]
+    C --> G[lane_overlap_ratio]
+    E --> H[Object risk score]
+    F --> H
+    G --> H
+    H --> I[Label HIGH / MEDIUM / LOW]
+    H --> J[path_occupancy_risk]
+    I --> K[Scene aggregation]
+    J --> K
+    D --> K
+    K --> L[scene_risk_score]
+    K --> M[dynamic_hazard_index]
+    K --> N[drivable_capacity_score]
+    K --> O[trip_safety_score]
+    K --> P[alert_flag]
 ```
 
-`estimate_risk(...)` tetap tersedia sebagai wrapper yang mengembalikan label final risk.
-
-**Threshold label object risk:**
-
-| Kondisi Skor                              | Level Risiko                                     |
-| ----------------------------------------- | ------------------------------------------------ |
-| `risk_score >= object_high_threshold`   | `HIGH`                                         |
-| `risk_score >= object_medium_threshold` | `MEDIUM`                                       |
-| selain itu                                | `LOW` / `UNKNOWN` (jika konteks tidak cukup) |
-
-**`compute_scene_metrics(object_calcs, flow_stats, lane_result)` — Insight level scene:**
-
-Metrik scene yang dihasilkan:
-
-- `scene_risk_score`: jumlah objek berlabel `HIGH`
-- `path_occupancy_risk`: akumulasi risiko objek pada area drivable
-- `dynamic_hazard_index`: indeks hazard dinamis gabungan object risk + occupancy + flow
-- `drivable_capacity_score`: kapasitas area drivable tersisa setelah dikurangi occupancy risk
-- `trip_safety_score`: skor keselamatan agregat frame-level
-- `alert_flag`: status alert gabungan rule scene
-
-`compute_scene_risk(object_calcs)` tetap ada sebagai utilitas untuk menghitung jumlah objek HIGH risk.
+**Inti sederhananya:** Risk Engine sekarang hanya menjawab apakah objek dekat, bergerak, dan mengganggu jalur. Sisanya adalah penggabungan dari tiga sinyal itu menjadi skor objek dan skor scene.
 
 ---
 
@@ -932,106 +810,115 @@ Metrik scene yang dihasilkan:
 
 #### `core/calculation/guidance_interpreter.py` — `GuidanceInterpreter`
 
-Mengkonversi metrik teknis dari risk engine menjadi guidance yang user-friendly untuk pengemudi awam (non-technical users).
+Guidance Interpreter tugasnya sederhana: mengubah angka teknis dari Risk Engine menjadi kalimat yang mudah dipahami pengemudi.
 
-**Purpose:**
+#### Parameter yang dipakai Guidance
 
-- Mengubah angka-angka seperti `trip_safety_score = 42.3` menjadi "🔴 BERBAHAYA - Sangat kurangi kecepatan, perhatian penuh"
-- Menyediakan interpretasi yang mudah dipahami tanpa perlu memahami technical details
-- Mendukung dual-mode display di dashboard (Information Mode untuk expert, Driving Mode untuk pengemudi umum)
+Guidance sekarang membaca 5 nilai utama dari hasil ringkasan database:
 
-**Main Methods:**
+- `avg_trip_safety_score`
+- `avg_drivable_capacity_score`
+- `avg_path_occupancy_risk`
+- `avg_detection_per_frame`
+- `avg_pipeline_fps`
 
-1. **`generate_guidance(metrics: dict) → dict`** — Entry point utama
+Jadi Guidance tidak menghitung ulang risk dari awal. Ia hanya membaca hasil akhir lalu mengubahnya menjadi status dan saran.
 
-   - Input: metrics dict dari `AnalyticsRepository.summary()`
-   - Output: comprehensive guidance dict dengan status, action, breakdown, recommendations
-2. **Interpretation Mappers** (Static methods):
+#### Cara kerja Guidance step by step
 
-   - `interpret_safety(trip_safety_score)` → `SafetyStatus` enum
-   - `< 22`: 🛑 CRITICAL (STOP - Sangat berbahaya)
-   - `22-42`: 🔴 DANGER (Berbahaya, sangat kurangi kecepatan)
-   - `42-68`: ⚠️ CAUTION (Hati-hati, kurangi kecepatan)
-   - `≥ 68`: ✅ SAFE (Aman, lanjutkan normal)
-   - `interpret_capacity(drivable_capacity_score)` → `CapacityStatus` enum
+1. **Baca ringkasan metrics**
 
-     - Mendeskripsikan kondisi area drivable di jalan
-   - `interpret_traffic(avg_detection_per_frame)` → `TrafficDensity` enum
+- Data diambil dari `AnalyticsRepository.summary()`.
+- Ini adalah rata-rata dari seluruh frame yang sudah diproses.
 
-     - Mendeskripsikan keramaian lalu lintas
-   - `interpret_system_health(avg_pipeline_fps)` → `SystemHealth` enum
+2. **Ubah safety score menjadi status utama**
 
-     - Mendeskripsikan responsivitas sistem
-   - `interpret_occupancy(path_occupancy_risk)` → `str`
+- Fungsi: `interpret_safety(trip_safety_score)`
+- Hasilnya bisa `SAFE`, `CAUTION`, `DANGER`, atau `CRITICAL`.
 
-     - Detail level pengisian lajur dengan objek
-3. **`generate_short_guidance_overlay(metrics)` → `str`**
+3. **Ubah kapasitas jalan menjadi status jalan**
 
-   - Menghasilkan teks singkat untuk overlay video (e.g., "⚠️ HATI-HATI\nKurangi kecepatan")
-   - Cocok untuk menampilkan di frame video atau realtime stream
+- Fungsi: `interpret_capacity(drivable_capacity_score)`
+- Hasilnya bisa `OPEN`, `ADEQUATE`, `NARROW`, atau `BLOCKED`.
 
-**Thresholds & Logic:**
+4. **Ubah occupancy menjadi deskripsi lajur**
 
-| Metrik                  | Threshold | Interpretasi                    |
-| ----------------------- | --------- | ------------------------------- |
-| trip_safety_score       | < 22      | 🛑 CRITICAL                     |
-|                         | 22-42     | 🔴 DANGER                       |
-|                         | 42-68     | ⚠️ CAUTION                    |
-|                         | ≥ 68     | ✅ SAFE                         |
-| drivable_capacity_score | < 25%     | BLOCKED (Jalan tertutup)        |
-|                         | 25-50%    | NARROW (Jalan sempit)           |
-|                         | 50-75%    | ADEQUATE (Cukup)                |
-|                         | ≥ 75%    | OPEN (Luas)                     |
-| path_occupancy_risk     | < 25      | Clear                           |
-|                         | 25-40     | Moderate                        |
-|                         | 40-60     | High                            |
-|                         | > 60      | Critical                        |
-| avg_detection_per_frame | ≤ 1      | EMPTY                           |
-|                         | 2-4       | NORMAL                          |
-|                         | 5-7       | HEAVY                           |
-|                         | > 7       | CONGESTED                       |
-| avg_pipeline_fps        | < 1       | CRITICAL (Sistem sangat lambat) |
-|                         | 1-3       | LAGGY (Sistem tertinggal)       |
-|                         | 3-5       | ADEQUATE (Agak lambat)          |
-|                         | ≥ 5      | SMOOTH (Responsif baik)         |
+- Fungsi: `interpret_occupancy(path_occupancy_risk)`
+- Output-nya berupa kalimat seperti:
+  - “Lajur sangat kosong”
+  - “Lajur mulai penuh”
+  - “Lajur hampir penuh”
 
-**Integration with Dashboard:**
+5. **Ubah jumlah deteksi menjadi kepadatan lalu lintas**
 
-Guidance automatically displayed di `app.py`:
+- Fungsi: `interpret_traffic(avg_detection_per_frame)`
+- Hasilnya bisa `EMPTY`, `NORMAL`, `HEAVY`, atau `CONGESTED`.
 
-- **Guidance Card** ditampilkan di dashboard dengan emoji status, action text, dan 4-column breakdown
-- **Mode Toggle**: User dapat switch antara "Information Mode" (semua data teknis) dan "Driving Mode" (guidance + rekomendasi saja)
-- Preference disimpan di browser `localStorage`
+6. **Ubah FPS menjadi kesehatan sistem**
 
-**Example Output:**
+- Fungsi: `interpret_system_health(avg_pipeline_fps)`
+- Hasilnya bisa `SMOOTH`, `ADEQUATE`, `LAGGY`, atau `CRITICAL`.
 
-```json
-{
-  "overall_status": "CAUTION",
-  "overall_status_emoji": "⚠️",
-  "overall_status_color": "#f59e0b",
-  "main_action": "Kurangi kecepatan, waspada terhadap hambatan",
-  "jalan_condition": "Area drivable berkurang, ada hambatan",
-  "occupancy_detail": "Lajur mulai penuh (43.2% terisi), kurangi kecepatan",
-  "traffic_condition": "HEAVY",
-  "traffic_condition_text": "Lalu lintas ramai, jaga jarak aman",
-  "system_health": "ADEQUATE",
-  "system_health_text": "Sistem agak lambat, perhatian lebih",
-  "system_fps": "4.23 FPS",
-  "recommendations": [
-    "⚠️ Kurangi kecepatan sedikit, waspada",
-    "📍 Ruang gerak terbatas, hati-hati dengan hambatan",
-    "🚛 Lalu lintas ramai, jaga jarak aman"
-  ],
-  "detailed_breakdown": {
-    "trip_safety_score": "62.4",
-    "drivable_capacity_score": "56.8%",
-    "path_occupancy_risk": "43.2",
-    "avg_detection_per_frame": "5.2",
-    "avg_pipeline_fps": "4.23"
-  }
-}
+7. **Buat rekomendasi**
+
+- Fungsi: `_generate_recommendations()`
+- Rekomendasi dibuat dari kombinasi safety, capacity, traffic, dan system health.
+
+#### Threshold yang dipakai Guidance
+
+Semua threshold masih disimpan di [GUIDANCE_CONFIG](config/settings.py), tetapi sekarang penggunaannya lebih langsung dan tidak berlapis-lapis.
+
+Yang dipakai:
+
+- `safety_critical_threshold`
+- `safety_danger_threshold`
+- `safety_caution_threshold`
+- `capacity_blocked_threshold`
+- `capacity_narrow_threshold`
+- `capacity_adequate_threshold`
+- `occupancy_clear_threshold`
+- `occupancy_moderate_threshold`
+- `occupancy_high_threshold`
+- `traffic_empty_threshold`
+- `traffic_normal_threshold`
+- `traffic_heavy_threshold`
+- `system_laggy_threshold`
+- `system_adequate_threshold`
+- `system_smooth_threshold`
+
+#### Diagram alur Guidance
+
+```mermaid
+flowchart TD
+   A["AnalyticsRepository.summary()"] --> B["avg_trip_safety_score"]
+   A --> C["avg_drivable_capacity_score"]
+   A --> D["avg_path_occupancy_risk"]
+   A --> E["avg_detection_per_frame"]
+   A --> F["avg_pipeline_fps"]
+
+   B --> G["Safety status"]
+   C --> H["Capacity status"]
+   D --> I["Occupancy description"]
+   E --> J["Traffic density"]
+   F --> K["System health"]
+
+   G --> L["Guidance card"]
+   L --> M["Recommendations"]
+   L --> N["Driving / Information mode"]
 ```
+
+#### Hasil akhirnya di UI
+
+Guidance yang tampil di dashboard adalah gabungan dari:
+
+- status utama: `SAFE`, `CAUTION`, `DANGER`, `CRITICAL`
+- kondisi jalan
+- deskripsi lajur
+- kondisi lalu lintas
+- kesehatan sistem
+- daftar rekomendasi singkat
+
+Jadi Guidance itu bukan hitungan baru, melainkan penerjemah hasil akhir dari Risk Engine menjadi bahasa yang lebih manusiawi.
 
 ---
 
